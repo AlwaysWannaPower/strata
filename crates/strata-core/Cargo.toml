@@ -1,0 +1,10 @@
+[package]
+name = "strata-core"
+version.workspace = true
+edition.workspace = true
+description = "Data engine of the strata workbench: raw-file ingestion (CSV/TSV/Parquet, encodings) to Parquet. No UI dependencies."
+
+[dependencies]
+polars = { version = "0.55", features = ["lazy", "csv", "parquet", "streaming", "fmt", "temporal", "polars-io"] }
+encoding_rs = "0.8"
+thiserror = "2"

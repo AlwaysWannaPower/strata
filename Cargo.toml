@@ -1,0 +1,14 @@
+# Workspace manifest for the `strata` Data Engineering Workbench.
+#
+# Members:
+#   crates/strata-core — library: all Polars/Parquet data logic (no UI).
+#   crates/strata-app  — binary: the Dioxus desktop application (UI only).
+#
+# Edition "2024" and version are shared via [workspace.package].
+[workspace]
+resolver = "3"
+members = ["crates/strata-core", "crates/strata-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"

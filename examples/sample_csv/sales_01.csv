@@ -1,0 +1,9 @@
+id,date,amount,customer
+1,2026-01-05,12.50,Alice Johnson
+2,2026-01-06,34.00,Bob Chen
+3,2026-01-08,7.25,Carol Danvers
+4,2026-01-10,99.90,Dave Evans
+5,2026-01-12,15.00,Alice Johnson
+6,2026-01-13,42.42,Fatima Khan
+7,2026-01-14,3.75,Bob Chen
+8,2026-01-15,120.00,Greg Liu
