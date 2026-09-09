@@ -37,9 +37,11 @@
 //! `docs/guide-1-dioxus.md`.
 
 mod preview;
-mod sources;
+mod schema_screen;
+pub(crate) mod sources;
 
 use dioxus::prelude::*;
+use schema_screen::SchemaScreen;
 use sources::SourcesScreen;
 
 /// The five top-level screens. Navigation is a plain Rust enum: the compiler
@@ -130,11 +132,7 @@ fn App() -> Element {
                     // adding a screen = compiler reminder to handle it here.
                     match *active.read() {
                         Screen::Sources => rsx! { SourcesScreen {} },
-                        Screen::Schema => rsx! { PlaceholderScreen {
-                            title: "Schemas",
-                            text: "Shared schemas arrive in M1b: schema inference across files, \
-                                   column types, conflicts, and manual encoding/delimiter overrides."
-                        } },
+                        Screen::Schema => rsx! { SchemaScreen {} },
                         Screen::Datasets => rsx! { PlaceholderScreen {
                             title: "Datasets",
                             text: "Folder staging already writes Parquet part files (see Sources). \
@@ -303,6 +301,14 @@ const CSS: &str = r#"
     .toolbar.opts { gap: 12px; }
     .opt { color: var(--muted); font-size: 12px; display: inline-flex;
            gap: 6px; align-items: center; }
+    .opt.checkbox { gap: 4px; cursor: pointer; }
+    .mono { font-family: monospace; }
+    .schema-h { margin: 14px 0 6px; font-size: 13px; color: #e2b93d; }
+    .conflict { border: 1px solid var(--line); border-left: 3px solid #e2b93d;
+                border-radius: 6px; padding: 8px 10px; background: var(--bg); }
+    .conflict-line { font-family: monospace; font-size: 12px; }
+    .conflict ul, .card-body ul { margin: 6px 0 0; padding-left: 20px;
+                                  font-size: 12px; color: var(--muted); }
     select { background: var(--bg); border: 1px solid var(--line);
              border-radius: 6px; color: var(--text); padding: 3px 6px;
              font-size: 12px; }

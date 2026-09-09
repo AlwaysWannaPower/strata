@@ -41,7 +41,11 @@ use crate::preview::{PreviewCard, PreviewTable};
 ///
 /// A tiny plain function (no Dioxus involved) so the mapping between UI values
 /// and engine options lives in exactly one place and is easy to unit-test.
-fn reader_options_from(encoding: &str, delimiter: &str) -> ReaderOptions {
+pub(crate) fn reader_options_from(
+    encoding: &str,
+    delimiter: &str,
+    has_header: bool,
+) -> ReaderOptions {
     let encoding = match encoding {
         "utf8" => Some(EncodingChoice::Utf8),
         "cp1251" => Some(EncodingChoice::Windows1251),
@@ -60,6 +64,7 @@ fn reader_options_from(encoding: &str, delimiter: &str) -> ReaderOptions {
     ReaderOptions {
         encoding,
         delimiter,
+        has_header,
     }
 }
 
@@ -105,6 +110,8 @@ fn SingleFileCard() -> Element {
     // Manual reader overrides. "auto" (default) = engine auto-detection.
     let mut encoding_choice = use_signal(|| String::from("auto"));
     let mut delimiter_choice = use_signal(|| String::from("auto"));
+    // Whether the first row of a text file is a header (default yes).
+    let mut header_choice = use_signal(|| true);
 
     // --- Behaviour: import a path into the preview ------------------------
     // Shared by Browse→Open and the demo button. Defined as a closure inside
@@ -113,7 +120,11 @@ fn SingleFileCard() -> Element {
     let mut import_from = move |path: PathBuf| {
         // Apply the currently selected manual options (read at click time, so
         // choosing a new encoding and pressing Open uses the new value).
-        let options = reader_options_from(&encoding_choice.read(), &delimiter_choice.read());
+        let options = reader_options_from(
+            &encoding_choice.read(),
+            &delimiter_choice.read(),
+            *header_choice.read(),
+        );
         let manual = options.encoding.is_some() || options.delimiter.is_some();
         match preview_source_with(&path, PREVIEW_MAX_ROWS, options) {
             Ok(table) => {
@@ -146,7 +157,11 @@ fn SingleFileCard() -> Element {
             status.set(String::from("import a source first"));
             return;
         };
-        let options = reader_options_from(&encoding_choice.read(), &delimiter_choice.read());
+        let options = reader_options_from(
+            &encoding_choice.read(),
+            &delimiter_choice.read(),
+            *header_choice.read(),
+        );
         match source_to_parquet_with(&source, &parquet_path, options) {
             Ok(report_data) => {
                 status.set(format!(
@@ -224,6 +239,16 @@ fn SingleFileCard() -> Element {
                             option { value: "tab", "tab" }
                             option { value: "|", "pipe (|)" }
                         }
+                    }
+                    label { class: "opt checkbox",
+                        input {
+                            r#type: "checkbox",
+                            checked: *header_choice.read(),
+                            onchange: move |evt: Event<FormData>| {
+                                header_choice.set(evt.checked());
+                            },
+                        }
+                        " first row is header"
                     }
                     span { class: "hint", "Re-run Open to apply." }
                 }

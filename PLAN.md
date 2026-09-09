@@ -139,11 +139,13 @@ Datasets / Quality / Logs) на enum `Screen` + экраны-заглушки; �
 **Тесты:** 10 (добавлены: скан папки, staging с пропуском «мусорного» файла,
 превью датасета из частей).
 
-**Остаток M1 (M1b):** ✅ *Reader Options сделаны* (ручной выбор кодировки/разделителя:
-`ReaderOptions` в ядре, `preview_source_with`/`source_to_parquet_with`, селекты в UI
-карточки Single file, тесты). Осталось: партиции датасета `year=…/month=…`; инференс/
-подтверждение схемы на экране Schemas; Excel (XLSX); `project.toml`; экран Datasets
-с браузером датасетов.
+**Остаток M1 (M1b):** ✅ *Reader Options* (кодировка/разделитель/«первая строка —
+заголовки»: `ReaderOptions.has_header`, чекбокс в UI). ✅ *Инференс схемы*:
+`strata-core/src/schema.rs` (`schema_from_file` / `schema_from_folder` — колонки+типы,
+конфликты типов между файлами, отсутствующие колонки, failed), экран Schemas в UI
+(файл или папка, reader-опции). Осталось: подтверждение/применение схемы при stage
+(cast к типам схемы), партиции датасета `year=…/month=…`, Excel (XLSX), `project.toml`,
+экран Datasets с браузером датасетов.
 
 ---
 

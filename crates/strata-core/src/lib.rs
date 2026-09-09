@@ -42,6 +42,14 @@ pub use folder::{
     FileMeta, FolderReport, FolderScan, StagedFile, folder_to_parquet, preview_parts, scan_folder,
 };
 
+/// Schema inference from files/folders ([`schema::schema_from_file`],
+/// [`schema::schema_from_folder`]) — the "Schemas" milestone of M1b.
+pub mod schema;
+pub use schema::{
+    FolderSchema, SchemaColumn, SchemaConflict, SchemaProposal, schema_from_file,
+    schema_from_folder,
+};
+
 // ---------------------------------------------------------------------------
 // Public domain types
 // ---------------------------------------------------------------------------
@@ -202,16 +210,18 @@ impl EncodingChoice {
     }
 }
 
-/// Overrides applied when reading a *text* source. `None` = auto-detect.
-///
-/// Both fields are independent and optional — the defaults ([`Default`]) keep
-/// the auto behaviour the raw layer had since M0.1.
+/// Overrides applied when reading a *text* source. Defaults keep the auto
+/// behaviour the raw layer had since M0.1 (`None` = auto-detect).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReaderOptions {
     /// Forced text encoding, or `None` for auto-detection.
     pub encoding: Option<EncodingChoice>,
     /// Forced field delimiter, or `None` for auto-detection.
     pub delimiter: Option<char>,
+    /// Whether the first row is a header with column names. Default `true`;
+    /// untick for header-less files (Polars then auto-names columns
+    /// `column_0, column_1, …` and treats the first row as data).
+    pub has_header: bool,
 }
 
 impl Default for ReaderOptions {
@@ -219,6 +229,7 @@ impl Default for ReaderOptions {
         ReaderOptions {
             encoding: None,
             delimiter: None,
+            has_header: true,
         }
     }
 }
@@ -313,7 +324,14 @@ fn open_any(
     // explicit choice must be validated strictly (decode the whole file), so
     // a wrong override fails loudly instead of silently producing mojibake.
     let stream_if_pure_utf8 = options.encoding.is_none();
-    let frame = read_text_frame(path, charset, delimiter, max_rows, stream_if_pure_utf8)?;
+    let frame = read_text_frame(
+        path,
+        charset,
+        delimiter,
+        options.has_header,
+        max_rows,
+        stream_if_pure_utf8,
+    )?;
     let source = SourceInfo {
         kind: SourceKind::DelimitedText { delimiter },
         encoding: charset.label().to_string(),
@@ -564,15 +582,16 @@ fn read_text_frame(
     path: &Path,
     charset: Charset,
     delimiter: char,
+    has_header: bool,
     max_rows: Option<usize>,
     stream_if_pure_utf8: bool,
 ) -> Result<DataFrame> {
     if charset == Charset::Utf8 && stream_if_pure_utf8 {
-        read_text_lazy(path, delimiter, max_rows)
+        read_text_lazy(path, delimiter, has_header, max_rows)
     } else {
         let bytes = std::fs::read(path)?;
         let text = decode_bytes(&bytes, charset)?;
-        read_text_from_buffer(text, delimiter, max_rows)
+        read_text_from_buffer(text, delimiter, has_header, max_rows)
     }
 }
 
@@ -581,9 +600,14 @@ fn read_text_frame(
 /// `max_rows: None` means "read everything" (used by staging); `Some(n)`
 /// limits the parse (used by previews) so we never read a huge file fully
 /// just to show 50 rows.
-fn read_text_lazy(path: &Path, delimiter: char, max_rows: Option<usize>) -> Result<DataFrame> {
+fn read_text_lazy(
+    path: &Path,
+    delimiter: char,
+    has_header: bool,
+    max_rows: Option<usize>,
+) -> Result<DataFrame> {
     let lazy = LazyCsvReader::new(to_plref_path(path)?)
-        .with_has_header(true)
+        .with_has_header(has_header)
         .with_n_rows(max_rows)
         .map_parse_options(|options| options.with_separator(delimiter as u8))
         .finish()?;
@@ -598,10 +622,11 @@ fn read_text_lazy(path: &Path, delimiter: char, max_rows: Option<usize>) -> Resu
 fn read_text_from_buffer(
     text: String,
     delimiter: char,
+    has_header: bool,
     max_rows: Option<usize>,
 ) -> Result<DataFrame> {
     let options = CsvReadOptions::default()
-        .with_has_header(true)
+        .with_has_header(has_header)
         .with_n_rows(max_rows)
         .with_parse_options(CsvParseOptions::default().with_separator(delimiter as u8));
     let reader = options.into_reader_with_file_handle(Cursor::new(text.into_bytes()));
@@ -896,6 +921,7 @@ mod tests {
         let options = ReaderOptions {
             encoding: Some(EncodingChoice::Windows1252),
             delimiter: None,
+            has_header: true,
         };
         let forced = preview_source_with(&path, 10, options).expect("forced 1252 preview");
         assert_eq!(forced.columns[0].name, "café");
@@ -922,6 +948,7 @@ mod tests {
         let options = ReaderOptions {
             encoding: None,
             delimiter: Some(','),
+            has_header: true,
         };
         let forced = preview_source_with(&path, 5, options).expect("forced preview");
         assert_eq!(forced.columns.len(), 1);
@@ -944,6 +971,7 @@ mod tests {
         let options = ReaderOptions {
             encoding: Some(EncodingChoice::Utf8),
             delimiter: None,
+            has_header: true,
         };
         let err = preview_source_with(&path, 5, options).expect_err("utf8 override must fail");
         assert!(matches!(err, StrataError::Encoding(_)));
