@@ -194,7 +194,6 @@ fn App() -> Element {
         .as_ref()
         .map(|w| w.dir.display().to_string())
         .unwrap_or_default();
-    let sample_now = *sample.read();
     let status_text = status.read().clone();
 
     rsx! {
@@ -227,7 +226,7 @@ fn App() -> Element {
 
             StatusBar {
                 text: status_text,
-                sample: sample_now,
+                sample: sample,
                 has_workspace: ws_snapshot.is_some(),
                 workspace_name: ws_name,
             }
@@ -235,13 +234,15 @@ fn App() -> Element {
     }
 }
 
-/// Props of [`StatusBar`]: status text + the latest resource sample.
+/// Props of [`StatusBar`]: status text + the resource-sample signal.
 #[derive(Props, Clone, PartialEq)]
 struct StatusBarProps {
     /// Global status line (last action) — shown on the left.
     text: String,
-    /// The latest resource snapshot (updates once per second).
-    sample: Sample,
+    /// Resource snapshot signal. Read *inside* this component so a per-second
+    /// update re-renders only the status bar, not the whole app (and does not
+    /// fight Dioxus over the global `<style>` node every second).
+    sample: Signal<Sample>,
     /// Whether a workspace is open (the data-size meter depends on it).
     has_workspace: bool,
     /// Workspace name for the trailing hint.
@@ -252,13 +253,15 @@ struct StatusBarProps {
 /// the right ("тулбар справа внизу").
 #[component]
 fn StatusBar(props: StatusBarProps) -> Element {
+    // Read the current sample once per render (this component is the only one
+    // subscribed to the signal, so it is the only one re-rendered each second).
+    let sample = *props.sample.read();
     // Format the meters once per sample (plain Rust, no state).
-    let cpu = props
-        .sample
+    let cpu = sample
         .cpu_pct
         .map(|pct| format!("CPU {pct:.0}%"))
         .unwrap_or_else(|| String::from("CPU —"));
-    let ram = match (props.sample.rss_bytes, props.sample.mem_total_bytes) {
+    let ram = match (sample.rss_bytes, sample.mem_total_bytes) {
         (Some(rss), Some(total)) => {
             let mb = rss as f64 / 1_048_576.0;
             let share = if total > 0 {
@@ -271,8 +274,7 @@ fn StatusBar(props: StatusBarProps) -> Element {
         _ => String::from("RAM —"),
     };
     let data = if props.has_workspace {
-        props
-            .sample
+        sample
             .data_bytes
             .map(|bytes| format!("data {}", util::format_bytes(bytes)))
             .unwrap_or_else(|| String::from("data …"))

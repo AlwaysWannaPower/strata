@@ -80,6 +80,9 @@ pub fn PipelineHome(props: PipelineHomeProps) -> Element {
     let mut inspecting = use_signal(|| Option::<PathBuf>::None);
     let mut root_input = use_signal(String::new);
     let mut name_input = use_signal(String::new);
+    // Typed-path fallback: creating/opening must not depend on the native file
+    // dialog (it can crash on systems with a broken GTK/glibc setup).
+    let mut folder_input = use_signal(String::new);
 
     // --- owned snapshots for rendering (see module docs) -------------------
     let ws_snapshot = ws.read().clone();
@@ -313,7 +316,7 @@ pub fn PipelineHome(props: PipelineHomeProps) -> Element {
                                         actions::create_workspace_ui(dir, name, ws, status);
                                     }
                                 },
-                                "Create workspace…"
+                                "Create…"
                             }
                             button {
                                 onclick: move |_| {
@@ -321,7 +324,51 @@ pub fn PipelineHome(props: PipelineHomeProps) -> Element {
                                         actions::open_workspace_ui(dir, ws, status);
                                     }
                                 },
-                                "Open workspace…"
+                                "Open…"
+                            }
+                        }
+
+                        // Typed-path fallback: no native dialog involved. If
+                        // the dialog buttons above crash on your system, use
+                        // these: type the folder path and press the action.
+                        div { class: "toolbar",
+                            input {
+                                class: "path-input",
+                                placeholder: "Folder path (type it here if the dialog fails)…",
+                                value: folder_input,
+                                oninput: move |evt: Event<FormData>| folder_input.set(evt.value()),
+                            }
+                            button {
+                                onclick: move |_| {
+                                    let text = folder_input.read().trim().to_string();
+                                    if text.is_empty() {
+                                        status.set(String::from(
+                                            "type a folder path or use the dialog buttons",
+                                        ));
+                                    } else {
+                                        let name = name_input.read().trim().to_string();
+                                        actions::create_workspace_ui(
+                                            PathBuf::from(text),
+                                            name,
+                                            ws,
+                                            status,
+                                        );
+                                    }
+                                },
+                                "Create at path"
+                            }
+                            button {
+                                onclick: move |_| {
+                                    let text = folder_input.read().trim().to_string();
+                                    if text.is_empty() {
+                                        status.set(String::from(
+                                            "type a folder path or use the dialog buttons",
+                                        ));
+                                    } else {
+                                        actions::open_workspace_ui(PathBuf::from(text), ws, status);
+                                    }
+                                },
+                                "Open at path"
                             }
                         }
 
