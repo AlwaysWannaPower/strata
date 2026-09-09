@@ -17,8 +17,11 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::folder::{FileMeta, scan_folder};
-use crate::{ReaderOptions, preview_source_with};
+use crate::folder::{FileMeta, FolderReport, scan_folder};
+use crate::{
+    ColumnDef, ReaderOptions, SchemaFile, delimiter_from_token, encoding_from_token,
+    preview_source_with, source_to_parquet_with,
+};
 
 /// How many rows of each file we read to infer types. Types are inferred from
 /// the header + a sample of values; reading more than this rarely changes the
@@ -193,6 +196,116 @@ pub fn schema_from_folder(dir: &Path, options: ReaderOptions) -> crate::Result<F
     })
 }
 
+/// Stage every file of a folder **under a confirmed schema**.
+///
+/// This is the "one folder = one schema" contract made executable: each file
+/// is read with the schema's reader options (encoding/delimiter/header) and
+/// its inferred columns/types are compared with the confirmed
+/// [`SchemaFile`]. A file that does not conform is **not** staged blindly —
+/// it goes to [`FolderReport::skipped`] with a concrete reason (this is where
+/// "either the files match the schema or you get an error" lives, `ТЗ.md` §7
+/// in its raw-layer form). Conforming files become `NNNN-<stem>.parquet`
+/// parts in `dest_dir`.
+///
+/// # Errors
+/// Only a destination write/scan failure is fatal; per-file problems are
+/// reported, never thrown.
+pub fn stage_folder_with_schema(
+    src_dir: &Path,
+    dest_dir: &Path,
+    schema: &SchemaFile,
+) -> crate::Result<FolderReport> {
+    use std::fs;
+    fs::create_dir_all(dest_dir)?;
+
+    let options = ReaderOptions {
+        encoding: encoding_from_token(&schema.encoding),
+        delimiter: delimiter_from_token(&schema.delimiter),
+        has_header: schema.has_header,
+    };
+
+    let scan = scan_folder(src_dir)?;
+    let mut staged = Vec::new();
+    let mut skipped = Vec::new();
+    let mut total_rows = 0u64;
+
+    for (index, meta) in scan.files.iter().enumerate() {
+        if meta.kind == "Other" {
+            skipped.push((meta.name.clone(), String::from("unsupported file kind")));
+            continue;
+        }
+        let source_path = src_dir.join(&meta.name);
+
+        // 1. Verify the file against the confirmed schema before writing.
+        let proposal = match schema_from_file(&source_path, options) {
+            Ok(proposal) => proposal,
+            Err(err) => {
+                skipped.push((meta.name.clone(), format!("cannot read: {err}")));
+                continue;
+            }
+        };
+        if let Some(reason) = schema_mismatch(&schema.columns, &proposal.columns) {
+            skipped.push((meta.name.clone(), format!("schema mismatch: {reason}")));
+            continue;
+        }
+
+        // 2. Conforming: full read with the schema's options + write the part.
+        let stem = source_path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| format!("file{index}"));
+        let part_path = dest_dir.join(format!("{index:04}-{stem}.parquet"));
+        match source_to_parquet_with(&source_path, &part_path, options) {
+            Ok(report) => {
+                total_rows += report.rows;
+                staged.push(crate::folder::StagedFile {
+                    name: meta.name.clone(),
+                    part_path: part_path.display().to_string(),
+                    rows: report.rows,
+                    columns: report.columns,
+                });
+            }
+            Err(err) => skipped.push((meta.name.clone(), format!("stage failed: {err}"))),
+        }
+    }
+
+    Ok(FolderReport {
+        staged,
+        skipped,
+        total_rows,
+        dest_dir: dest_dir.display().to_string(),
+    })
+}
+
+/// Compare the confirmed schema columns with what a file actually exposes.
+///
+/// Returns a human reason for the first mismatch (order, name or type), or
+/// `None` when the file conforms.
+fn schema_mismatch(expected: &[ColumnDef], actual: &[SchemaColumn]) -> Option<String> {
+    if expected.len() != actual.len() {
+        return Some(format!(
+            "{} column(s) expected, {} found",
+            expected.len(),
+            actual.len()
+        ));
+    }
+    for (expected, actual) in expected.iter().zip(actual) {
+        if expected.name != actual.name {
+            return Some(format!(
+                "expected column '{}', file has '{}'",
+                expected.name, actual.name
+            ));
+        }
+        if expected.dtype != actual.dtype {
+            return Some(format!(
+                "'{}': expected type {}, found {}",
+                expected.name, expected.dtype, actual.dtype
+            ));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,5 +423,120 @@ mod tests {
     fn fs_write(path: &std::path::Path, bytes: &[u8]) {
         use std::fs::write;
         write(path, bytes).expect("write temp bytes");
+    }
+
+    fn sample_schema() -> SchemaFile {
+        use crate::ColumnDef;
+        SchemaFile {
+            format: 1,
+            source: String::new(),
+            has_header: true,
+            encoding: "auto".to_string(),
+            delimiter: "auto".to_string(),
+            columns: vec![
+                ColumnDef {
+                    name: "id".into(),
+                    dtype: "i64".into(),
+                },
+                ColumnDef {
+                    name: "amount".into(),
+                    dtype: "f64".into(),
+                },
+                ColumnDef {
+                    name: "name".into(),
+                    dtype: "str".into(),
+                },
+            ],
+            saved_utc: "t".into(),
+        }
+    }
+
+    fn conform_csv(text: &str) -> String {
+        // id,amount,name with numeric amount and a string name.
+        format!("id,amount,name\n{text}")
+    }
+
+    #[test]
+    fn schema_validated_staging_stages_conforming_files() {
+        let dir = temp_path("sv_ok");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_text(
+            &dir.join("a.csv"),
+            &conform_csv("1,12.5,Alpha\n2,7.0,Beta\n"),
+        );
+        write_text(&dir.join("b.csv"), &conform_csv("3,9.25,Gamma\n"));
+        let dest = temp_path("sv_ok_dst");
+
+        let report = stage_folder_with_schema(&dir, &dest, &sample_schema()).expect("stage");
+        assert_eq!(report.staged.len(), 2);
+        assert!(report.skipped.is_empty(), "no skips: {:?}", report.skipped);
+        assert_eq!(report.total_rows, 3);
+
+        let preview = crate::preview_parts(&dest, 100).expect("preview");
+        assert_eq!(preview.rows.len(), 3);
+
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(dest);
+    }
+
+    #[test]
+    fn schema_validated_staging_reports_nonconforming_file() {
+        let dir = temp_path("sv_bad");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_text(&dir.join("good.csv"), &conform_csv("1,12.5,Alpha\n"));
+        // amount is text here — violates the confirmed f64 schema.
+        write_text(&dir.join("bad.csv"), "id,amount,name\n2,n/a,Beta\n");
+        let dest = temp_path("sv_bad_dst");
+
+        let report = stage_folder_with_schema(&dir, &dest, &sample_schema()).expect("stage");
+        assert_eq!(report.staged.len(), 1, "good file staged");
+        assert_eq!(report.skipped.len(), 1, "bad file rejected");
+        assert_eq!(report.skipped[0].0, "bad.csv");
+        assert!(
+            report.skipped[0].1.contains("expected type f64"),
+            "reason names the expected type: {}",
+            report.skipped[0].1
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(dest);
+    }
+
+    #[test]
+    fn schema_reader_options_are_applied_during_validated_stage() {
+        // A windows-1251, semicolon-delimited file bound to a schema that says
+        // so: staging must use those options and read Russian cleanly.
+        let dir = temp_path("sv_opts");
+        std::fs::create_dir_all(&dir).unwrap();
+        let text = "дата;сумма\n2026-01-05;12.50\n2026-01-06;7.25\n";
+        let (bytes, _, _) = encoding_rs::WINDOWS_1251.encode(text);
+        fs_write(&dir.join("rus.csv"), &bytes);
+        let dest = temp_path("sv_opts_dst");
+
+        let mut schema = sample_schema();
+        schema.columns = vec![
+            crate::ColumnDef {
+                name: "дата".into(),
+                dtype: "str".into(),
+            },
+            crate::ColumnDef {
+                name: "сумма".into(),
+                dtype: "f64".into(),
+            },
+        ];
+        schema.encoding = "cp1251".to_string();
+        schema.delimiter = "semicolon".to_string();
+
+        let report = stage_folder_with_schema(&dir, &dest, &schema).expect("stage");
+        assert_eq!(report.staged.len(), 1);
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+
+        let preview = crate::preview_parts(&dest, 100).expect("preview");
+        assert_eq!(preview.rows.len(), 2);
+        assert_eq!(preview.rows[0][0], "2026-01-05");
+        assert_eq!(preview.columns[0].name, "дата");
+
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(dest);
     }
 }
