@@ -300,6 +300,13 @@ const CSS: &str = r#"
                  font-size: 12px; }
     .report strong { color: var(--muted); text-transform: uppercase;
                      font-size: 11px; letter-spacing: 0.4px; }
+    .toolbar.opts { gap: 12px; }
+    .opt { color: var(--muted); font-size: 12px; display: inline-flex;
+           gap: 6px; align-items: center; }
+    select { background: var(--bg); border: 1px solid var(--line);
+             border-radius: 6px; color: var(--text); padding: 3px 6px;
+             font-size: 12px; }
+    select:hover { border-color: var(--accent); }
     .status { color: var(--muted); font-size: 12px; min-height: 1.1em;
               font-family: monospace; white-space: pre-wrap; }
 "#;

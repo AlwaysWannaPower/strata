@@ -31,11 +31,37 @@
 use dioxus::prelude::*;
 use std::path::PathBuf;
 use strata_core::{
-    FolderReport, FolderScan, ImportReport, Preview, folder_to_parquet, preview_parts,
-    preview_source, scan_folder, source_to_parquet,
+    EncodingChoice, FolderReport, FolderScan, ImportReport, Preview, ReaderOptions,
+    folder_to_parquet, preview_parts, preview_source_with, scan_folder, source_to_parquet_with,
 };
 
 use crate::preview::{PreviewCard, PreviewTable};
+
+/// Build the engine [`ReaderOptions`] from the two selectors ("auto" = None).
+///
+/// A tiny plain function (no Dioxus involved) so the mapping between UI values
+/// and engine options lives in exactly one place and is easy to unit-test.
+fn reader_options_from(encoding: &str, delimiter: &str) -> ReaderOptions {
+    let encoding = match encoding {
+        "utf8" => Some(EncodingChoice::Utf8),
+        "cp1251" => Some(EncodingChoice::Windows1251),
+        "cp1252" => Some(EncodingChoice::Windows1252),
+        "utf16le" => Some(EncodingChoice::Utf16Le),
+        "utf16be" => Some(EncodingChoice::Utf16Be),
+        _ => None, // "auto"
+    };
+    let delimiter = match delimiter {
+        "," => Some(','),
+        ";" => Some(';'),
+        "tab" => Some('\t'),
+        "|" => Some('|'),
+        _ => None, // "auto"
+    };
+    ReaderOptions {
+        encoding,
+        delimiter,
+    }
+}
 
 /// How many rows each preview shows. Kept deliberately small so a preview
 /// never reads a huge file fully — the raw staging reads everything, the
@@ -76,27 +102,42 @@ fn SingleFileCard() -> Element {
     let mut preview = use_signal(|| Option::<Preview>::None);
     let mut report = use_signal(|| Option::<ImportReport>::None);
     let mut source_path = use_signal(|| Option::<PathBuf>::None);
+    // Manual reader overrides. "auto" (default) = engine auto-detection.
+    let mut encoding_choice = use_signal(|| String::from("auto"));
+    let mut delimiter_choice = use_signal(|| String::from("auto"));
 
     // --- Behaviour: import a path into the preview ------------------------
     // Shared by Browse→Open and the demo button. Defined as a closure inside
     // the component so it can capture the signals; `move` because the closure
     // outlives this scope (it is stored in the event handlers).
-    let mut import_from = move |path: PathBuf| match preview_source(&path, PREVIEW_MAX_ROWS) {
-        Ok(table) => {
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.display().to_string());
-            *preview.write() = Some(table.clone());
-            *source_path.write() = Some(path);
-            *report.write() = None;
-            status.set(format!(
-                "{name}: {} — showing {} row(s)",
-                table.source.summary(),
-                table.rows.len()
-            ));
+    let mut import_from = move |path: PathBuf| {
+        // Apply the currently selected manual options (read at click time, so
+        // choosing a new encoding and pressing Open uses the new value).
+        let options = reader_options_from(&encoding_choice.read(), &delimiter_choice.read());
+        let manual = options.encoding.is_some() || options.delimiter.is_some();
+        match preview_source_with(&path, PREVIEW_MAX_ROWS, options) {
+            Ok(table) => {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string());
+                *preview.write() = Some(table.clone());
+                *source_path.write() = Some(path);
+                *report.write() = None;
+                let note = if manual {
+                    " (manual options applied)"
+                } else {
+                    ""
+                };
+                status.set(format!(
+                    "{name}: {}{} — showing {} row(s)",
+                    table.source.summary(),
+                    note,
+                    table.rows.len()
+                ));
+            }
+            Err(err) => status.set(format!("cannot import {}: {err}", path.display())),
         }
-        Err(err) => status.set(format!("cannot import {}: {err}", path.display())),
     };
 
     // Stage the currently previewed source to Parquet (raw layer, no rules).
@@ -105,7 +146,8 @@ fn SingleFileCard() -> Element {
             status.set(String::from("import a source first"));
             return;
         };
-        match source_to_parquet(&source, &parquet_path) {
+        let options = reader_options_from(&encoding_choice.read(), &delimiter_choice.read());
+        match source_to_parquet_with(&source, &parquet_path, options) {
             Ok(report_data) => {
                 status.set(format!(
                     "staged {} rows x {} columns → {} [{}]",
@@ -154,6 +196,36 @@ fn SingleFileCard() -> Element {
                         },
                         "Open"
                     }
+                }
+                // Advanced (optional): manual reader overrides for when
+                // auto-detection guesses wrong. Each <select> writes its value
+                // into a Signal; import_from/stage_to read them at click time.
+                div { class: "toolbar opts",
+                    span { class: "hint", "Reader options:" }
+                    label { class: "opt",
+                        "Encoding "
+                        select {
+                            onchange: move |evt: Event<FormData>| encoding_choice.set(evt.value()),
+                            option { value: "auto", "Auto" }
+                            option { value: "utf8", "UTF-8" }
+                            option { value: "cp1251", "windows-1251" }
+                            option { value: "cp1252", "windows-1252" }
+                            option { value: "utf16le", "UTF-16 LE" }
+                            option { value: "utf16be", "UTF-16 BE" }
+                        }
+                    }
+                    label { class: "opt",
+                        "Delimiter "
+                        select {
+                            onchange: move |evt: Event<FormData>| delimiter_choice.set(evt.value()),
+                            option { value: "auto", "Auto" }
+                            option { value: ",", "comma (,)" }
+                            option { value: ";", "semicolon (;)" }
+                            option { value: "tab", "tab" }
+                            option { value: "|", "pipe (|)" }
+                        }
+                    }
+                    span { class: "hint", "Re-run Open to apply." }
                 }
                 // Demo convenience (dev/test): load the bundled sample.
                 div { class: "toolbar hints",

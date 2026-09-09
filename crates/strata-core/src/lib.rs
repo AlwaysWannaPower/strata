@@ -169,74 +169,112 @@ pub struct ImportReport {
     pub source: SourceInfo,
 }
 
+/// A text encoding the user can force instead of auto-detection.
+///
+/// Auto-detection (BOM → strict UTF-8 → Cyrillic heuristic) is right in most
+/// cases, but not all — e.g. a windows-1252 file whose bytes happen to look
+/// like windows-1251. This enum lets the user (or, later, a saved project
+/// schema) say "no, read it as …". See [`ReaderOptions`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncodingChoice {
+    /// Standard UTF-8 (a UTF-8 BOM, if present, is still stripped).
+    Utf8,
+    /// windows-1251 (Cyrillic).
+    Windows1251,
+    /// windows-1252 (Western European / Latin-1 superset).
+    Windows1252,
+    /// UTF-16 little-endian.
+    Utf16Le,
+    /// UTF-16 big-endian.
+    Utf16Be,
+}
+
+impl EncodingChoice {
+    /// Human-readable name, reused for the provenance line.
+    pub fn label(self) -> &'static str {
+        match self {
+            EncodingChoice::Utf8 => "UTF-8",
+            EncodingChoice::Windows1251 => "windows-1251",
+            EncodingChoice::Windows1252 => "windows-1252",
+            EncodingChoice::Utf16Le => "UTF-16 LE",
+            EncodingChoice::Utf16Be => "UTF-16 BE",
+        }
+    }
+}
+
+/// Overrides applied when reading a *text* source. `None` = auto-detect.
+///
+/// Both fields are independent and optional — the defaults ([`Default`]) keep
+/// the auto behaviour the raw layer had since M0.1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReaderOptions {
+    /// Forced text encoding, or `None` for auto-detection.
+    pub encoding: Option<EncodingChoice>,
+    /// Forced field delimiter, or `None` for auto-detection.
+    pub delimiter: Option<char>,
+}
+
+impl Default for ReaderOptions {
+    fn default() -> Self {
+        ReaderOptions {
+            encoding: None,
+            delimiter: None,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 /// Read at most `max_rows` rows of any supported source file ([`SourceKind`]).
 ///
+/// Equivalent to [`preview_source_with`] with default (auto) [`ReaderOptions`].
+///
 /// # Errors
 /// I/O errors, decode errors (see [`StrataError::Encoding`]) and Polars parse
 /// errors are all reported through [`StrataError`].
 pub fn preview_source(path: &Path, max_rows: usize) -> Result<Preview> {
-    let head = read_head(path, HEAD_BYTES)?;
+    preview_source_with(path, max_rows, ReaderOptions::default())
+}
 
-    if looks_like_parquet(path, &head) {
-        let frame = scan_parquet_head(path, Some(max_rows))?;
-        let source = SourceInfo {
-            kind: SourceKind::Parquet,
-            encoding: String::from("— (binary)"),
-        };
-        return Ok(preview_from_frame(&frame, source));
-    }
-
-    // Text file: detect encoding, then delimiter from the decoded first line.
-    let charset = detect_charset(&head);
-    let delimiter = detect_delimiter(first_line(&decode_sample(&head, charset)?));
-
-    let frame = read_text_frame(path, charset, delimiter, Some(max_rows))?;
-    let source = SourceInfo {
-        kind: SourceKind::DelimitedText { delimiter },
-        encoding: charset.label().to_string(),
-    };
+/// Like [`preview_source`], but honouring manual [`ReaderOptions`] overrides
+/// (encoding / delimiter) for text files.
+pub fn preview_source_with(
+    path: &Path,
+    max_rows: usize,
+    options: ReaderOptions,
+) -> Result<Preview> {
+    let (frame, source) = open_any(path, options, Some(max_rows))?;
     Ok(preview_from_frame(&frame, source))
 }
 
 /// Stage any supported source file into a single Parquet file (raw layer).
 ///
-/// "Stage" = faithful carry-over: decode/type correctly, but change no values.
-/// See the module docs for the staging philosophy.
+/// Equivalent to [`source_to_parquet_with`] with default (auto)
+/// [`ReaderOptions`]. "Stage" = faithful carry-over: decode/type correctly,
+/// but change no values (see module docs).
 ///
 /// # Errors
 /// Same error surface as [`preview_source`].
 pub fn source_to_parquet(path: &Path, parquet_path: &Path) -> Result<ImportReport> {
-    let head = read_head(path, HEAD_BYTES)?;
+    source_to_parquet_with(path, parquet_path, ReaderOptions::default())
+}
 
-    let (frame, source) = if looks_like_parquet(path, &head) {
-        // Parquet → Parquet: normalization only (single row-group file).
-        let frame = scan_parquet_head(path, None)?;
-        let source = SourceInfo {
-            kind: SourceKind::Parquet,
-            encoding: String::from("— (binary)"),
-        };
-        (frame, source)
-    } else {
-        let charset = detect_charset(&head);
-        let delimiter = detect_delimiter(first_line(&decode_sample(&head, charset)?));
-        let frame = read_text_frame(path, charset, delimiter, None)?;
-        let source = SourceInfo {
-            kind: SourceKind::DelimitedText { delimiter },
-            encoding: charset.label().to_string(),
-        };
-        (frame, source)
-    };
-
+/// Like [`source_to_parquet`], but honouring manual [`ReaderOptions`]
+/// overrides for text files.
+pub fn source_to_parquet_with(
+    path: &Path,
+    parquet_path: &Path,
+    options: ReaderOptions,
+) -> Result<ImportReport> {
+    let (mut frame, source) = open_any(path, options, None)?;
     let rows = frame.height();
     let columns = frame.width();
 
     let mut file = std::fs::File::create(parquet_path)?;
     let writer = ParquetWriter::new(&mut file);
-    writer.finish(&mut frame.into())?;
+    writer.finish(&mut frame)?;
 
     Ok(ImportReport {
         rows: rows as u64,
@@ -245,6 +283,67 @@ pub fn source_to_parquet(path: &Path, parquet_path: &Path) -> Result<ImportRepor
         parquet_path: parquet_path.display().to_string(),
         source,
     })
+}
+
+/// Open any supported file into a materialized frame plus provenance.
+///
+/// Central decision point shared by preview and staging so both always agree:
+/// 1. Parquet → native scan (no text decoding);
+/// 2. text → resolve (charset, delimiter) from [`ReaderOptions`] or auto
+///    detection, then read (lazy for pure auto-UTF-8, decode-then-parse
+///    otherwise).
+fn open_any(
+    path: &Path,
+    options: ReaderOptions,
+    max_rows: Option<usize>,
+) -> Result<(DataFrame, SourceInfo)> {
+    let head = read_head(path, HEAD_BYTES)?;
+
+    if looks_like_parquet(path, &head) {
+        let frame = scan_parquet_head(path, max_rows)?;
+        let source = SourceInfo {
+            kind: SourceKind::Parquet,
+            encoding: String::from("— (binary)"),
+        };
+        return Ok((frame, source));
+    }
+
+    let (charset, delimiter) = resolve_text_parameters(&head, options)?;
+    // Lazy streaming is only safe when we did *not* force an encoding: an
+    // explicit choice must be validated strictly (decode the whole file), so
+    // a wrong override fails loudly instead of silently producing mojibake.
+    let stream_if_pure_utf8 = options.encoding.is_none();
+    let frame = read_text_frame(path, charset, delimiter, max_rows, stream_if_pure_utf8)?;
+    let source = SourceInfo {
+        kind: SourceKind::DelimitedText { delimiter },
+        encoding: charset.label().to_string(),
+    };
+    Ok((frame, source))
+}
+
+/// Decide (charset, delimiter) for a text file: `ReaderOptions` overrides win,
+/// otherwise auto-detection (BOM → strict UTF-8 → Cyrillic heuristic) runs.
+fn resolve_text_parameters(head: &[u8], options: ReaderOptions) -> Result<(Charset, char)> {
+    let charset = match options.encoding {
+        Some(choice) => {
+            let charset = choice.into_charset();
+            // Even a forced UTF-8 read must strip a UTF-8 BOM, otherwise the
+            // BOM becomes part of the first header name.
+            if charset == Charset::Utf8 && head.starts_with(&[0xEF, 0xBB, 0xBF]) {
+                Charset::Utf8Bom
+            } else {
+                charset
+            }
+        }
+        None => detect_charset(head),
+    };
+
+    let delimiter = match options.delimiter {
+        Some(delimiter) => delimiter,
+        None => detect_delimiter(first_line(&decode_sample(head, charset)?)),
+    };
+
+    Ok((charset, delimiter))
 }
 
 // ---------------------------------------------------------------------------
@@ -324,6 +423,19 @@ impl Charset {
     }
 }
 
+impl EncodingChoice {
+    /// Map a public, user-selectable encoding onto the internal decoder set.
+    fn into_charset(self) -> Charset {
+        match self {
+            EncodingChoice::Utf8 => Charset::Utf8,
+            EncodingChoice::Windows1251 => Charset::Windows1251,
+            EncodingChoice::Windows1252 => Charset::Windows1252,
+            EncodingChoice::Utf16Le => Charset::Utf16Le,
+            EncodingChoice::Utf16Be => Charset::Utf16Be,
+        }
+    }
+}
+
 /// Detect the charset of a text file from its leading bytes.
 ///
 /// Priority: byte-order marks (authoritative) → strict UTF-8 → a small
@@ -360,22 +472,27 @@ fn count_cyrillic(text: &str) -> usize {
         .count()
 }
 
+/// Byte-offset of the BOM for `charset`, when present. Explicit UTF-16 reads
+/// are valid *with or without* a BOM, so we only strip what is actually there.
+fn bom_len(charset: Charset, bytes: &[u8]) -> usize {
+    match charset {
+        Charset::Utf8Bom if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) => 3,
+        Charset::Utf16Le if bytes.starts_with(&[0xFF, 0xFE]) => 2,
+        Charset::Utf16Be if bytes.starts_with(&[0xFE, 0xFF]) => 2,
+        _ => 0,
+    }
+}
+
 /// Decode *sampling* bytes (may be truncated mid-character): lossy is fine,
 /// we only use the result to find the first line and the delimiter.
 fn decode_sample(bytes: &[u8], charset: Charset) -> Result<String> {
+    let body = &bytes[bom_len(charset, bytes)..];
     match charset {
-        Charset::Utf8 => Ok(String::from_utf8_lossy(bytes).into_owned()),
-        Charset::Utf8Bom => Ok(String::from_utf8_lossy(&bytes[3.min(bytes.len())..]).into_owned()),
-        Charset::Utf16Le => Ok(encoding_rs::UTF_16LE
-            .decode(&bytes[2.min(bytes.len())..])
-            .0
-            .into_owned()),
-        Charset::Utf16Be => Ok(encoding_rs::UTF_16BE
-            .decode(&bytes[2.min(bytes.len())..])
-            .0
-            .into_owned()),
-        Charset::Windows1251 => Ok(WINDOWS_1251.decode(bytes).0.into_owned()),
-        Charset::Windows1252 => Ok(encoding_rs::WINDOWS_1252.decode(bytes).0.into_owned()),
+        Charset::Utf8 | Charset::Utf8Bom => Ok(String::from_utf8_lossy(body).into_owned()),
+        Charset::Utf16Le => Ok(encoding_rs::UTF_16LE.decode(body).0.into_owned()),
+        Charset::Utf16Be => Ok(encoding_rs::UTF_16BE.decode(body).0.into_owned()),
+        Charset::Windows1251 => Ok(WINDOWS_1251.decode(body).0.into_owned()),
+        Charset::Windows1252 => Ok(encoding_rs::WINDOWS_1252.decode(body).0.into_owned()),
     }
 }
 
@@ -383,24 +500,14 @@ fn decode_sample(bytes: &[u8], charset: Charset) -> Result<String> {
 /// byte becomes a hard error (better than silently inserting U+FFFD into
 /// staging data).
 fn decode_bytes(bytes: &[u8], charset: Charset) -> Result<String> {
+    let body = &bytes[bom_len(charset, bytes)..];
     match charset {
-        Charset::Utf8 => String::from_utf8(bytes.to_vec())
+        Charset::Utf8 | Charset::Utf8Bom => String::from_utf8(body.to_vec())
             .map_err(|e| StrataError::Encoding(format!("file is not valid UTF-8: {e}"))),
-        Charset::Utf8Bom => {
-            let body = &bytes[3.min(bytes.len())..];
-            String::from_utf8(body.to_vec())
-                .map_err(|e| StrataError::Encoding(format!("file is not valid UTF-8: {e}")))
-        }
-        Charset::Utf16Le => Ok(encoding_rs::UTF_16LE
-            .decode(&bytes[2.min(bytes.len())..])
-            .0
-            .into_owned()),
-        Charset::Utf16Be => Ok(encoding_rs::UTF_16BE
-            .decode(&bytes[2.min(bytes.len())..])
-            .0
-            .into_owned()),
-        Charset::Windows1251 => Ok(WINDOWS_1251.decode(bytes).0.into_owned()),
-        Charset::Windows1252 => Ok(encoding_rs::WINDOWS_1252.decode(bytes).0.into_owned()),
+        Charset::Utf16Le => Ok(encoding_rs::UTF_16LE.decode(body).0.into_owned()),
+        Charset::Utf16Be => Ok(encoding_rs::UTF_16BE.decode(body).0.into_owned()),
+        Charset::Windows1251 => Ok(WINDOWS_1251.decode(body).0.into_owned()),
+        Charset::Windows1252 => Ok(encoding_rs::WINDOWS_1252.decode(body).0.into_owned()),
     }
 }
 
@@ -447,10 +554,10 @@ fn detect_delimiter(line: &str) -> char {
 // ---------------------------------------------------------------------------
 
 /// Read a delimited text file into a frame, choosing the right path:
-/// * pure UTF-8 → lazy stream straight from the file (scalable);
-/// * anything else → decode the whole file into UTF-8 first, then parse from
-///   memory (whole-file read; chunked streaming for huge non-UTF-8 files is a
-///   later milestone — see `PLAN.md` M6).
+/// * pure auto-detected UTF-8 → lazy stream straight from the file (scalable);
+/// * anything else (incl. every *forced* encoding) → decode the whole file
+///   into UTF-8 first, then parse from memory. Forced encodings are validated
+///   strictly on purpose: a wrong override must fail loudly, not mojibake.
 ///
 /// `max_rows: None` reads everything (staging); `Some(n)` reads a preview.
 fn read_text_frame(
@@ -458,8 +565,9 @@ fn read_text_frame(
     charset: Charset,
     delimiter: char,
     max_rows: Option<usize>,
+    stream_if_pure_utf8: bool,
 ) -> Result<DataFrame> {
-    if charset == Charset::Utf8 {
+    if charset == Charset::Utf8 && stream_if_pure_utf8 {
         read_text_lazy(path, delimiter, max_rows)
     } else {
         let bytes = std::fs::read(path)?;
@@ -770,5 +878,76 @@ mod tests {
 
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(parquet);
+    }
+
+    // ------------------------------------------------------------------
+    // M1b: manual ReaderOptions overrides (when auto-detection is wrong)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn encoding_override_fixes_windows1252_misdetection() {
+        // "café" in windows-1252 is bytes ...E9. Auto-detection prefers
+        // windows-1251 here (decoding 0xE9 as 1251 yields Cyrillic 'й',
+        // which wins the Cyrillic heuristic). Forcing 1252 must read 'é'.
+        let text = "café;prix\n1;2\n3;4\n";
+        let (bytes, _, _) = encoding_rs::WINDOWS_1252.encode(text);
+        let path = write_temp_bytes(&bytes, "cp1252.csv");
+
+        let options = ReaderOptions {
+            encoding: Some(EncodingChoice::Windows1252),
+            delimiter: None,
+        };
+        let forced = preview_source_with(&path, 10, options).expect("forced 1252 preview");
+        assert_eq!(forced.columns[0].name, "café");
+        assert_eq!(forced.source.encoding, "windows-1252");
+
+        // Staging honours the same override.
+        let parquet = unique_temp("cp1252.parquet");
+        let report = source_to_parquet_with(&path, &parquet, options).expect("forced 1252 stage");
+        assert_eq!(report.source.encoding, "windows-1252");
+        assert_eq!(report.columns, 2);
+
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(parquet);
+    }
+
+    #[test]
+    fn delimiter_override_changes_parsing() {
+        // Auto-detection finds '|'; forcing ',' must split nothing and yield
+        // one wide column — proving the override is really applied.
+        let path = write_temp_text("a|b|c\n1|2|3\n", "pipes.txt");
+        let auto = preview_source(&path, 5).expect("auto preview");
+        assert_eq!(auto.columns.len(), 3);
+
+        let options = ReaderOptions {
+            encoding: None,
+            delimiter: Some(','),
+        };
+        let forced = preview_source_with(&path, 5, options).expect("forced preview");
+        assert_eq!(forced.columns.len(), 1);
+        assert_eq!(forced.columns[0].name, "a|b|c");
+        assert_eq!(
+            forced.source.kind,
+            SourceKind::DelimitedText { delimiter: ',' }
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn forced_utf8_on_cp1251_file_fails_loudly() {
+        // A wrong explicit override must error, not silently corrupt.
+        let text = "дата;сумма\n2026-01-05;1.5\n";
+        let (bytes, _, _) = WINDOWS_1251.encode(text);
+        let path = write_temp_bytes(&bytes, "cp1251_forbidden_utf8.csv");
+
+        let options = ReaderOptions {
+            encoding: Some(EncodingChoice::Utf8),
+            delimiter: None,
+        };
+        let err = preview_source_with(&path, 5, options).expect_err("utf8 override must fail");
+        assert!(matches!(err, StrataError::Encoding(_)));
+
+        let _ = std::fs::remove_file(path);
     }
 }
