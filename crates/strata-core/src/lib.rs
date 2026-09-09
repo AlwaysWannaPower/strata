@@ -535,6 +535,25 @@ fn read_head(path: &Path, limit: usize) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// How many leading bytes a *preview* reads when the file needs decoding.
+/// Pure UTF-8 previews stream lazily and never buffer the file; non-UTF-8
+/// files must be decoded to UTF-8 first, so we cap that work to a few rows'
+/// worth instead of decoding a multi-GB file to show 50 rows.
+const PREVIEW_DECODE_BUDGET: usize = 4 * 1024 * 1024;
+
+/// Clip a byte prefix to the last complete record (newline), so a truncated
+/// decode never parses a ragged half-line. Falls back to the whole prefix when
+/// there is no newline at all (e.g. a single-line file).
+fn clip_to_record_boundary(bytes: &[u8]) -> &[u8] {
+    if bytes.is_empty() || bytes[bytes.len() - 1] == b'\n' {
+        return bytes;
+    }
+    match bytes.iter().rposition(|&b| b == b'\n') {
+        Some(index) => &bytes[..=index],
+        None => bytes,
+    }
+}
+
 /// A Parquet file is identified by its magic bytes (`PAR1` at offset 0),
 /// with the extension as a fallback hint for truncated reads.
 fn looks_like_parquet(path: &Path, head: &[u8]) -> bool {
@@ -718,10 +737,19 @@ fn read_text_frame(
 ) -> Result<DataFrame> {
     if charset == Charset::Utf8 && stream_if_pure_utf8 {
         read_text_lazy(path, delimiter, has_header, max_rows)
+    } else if let Some(rows) = max_rows {
+        // Preview of a non-UTF-8 file: decode only a bounded prefix (clipped
+        // to a whole record) instead of the entire file — the memory/CPU win
+        // that keeps a 2 GB cp1251 export cheap to peek at.
+        let bytes = read_head(path, PREVIEW_DECODE_BUDGET)?;
+        let bytes = clip_to_record_boundary(&bytes).to_vec();
+        let text = decode_bytes(&bytes, charset)?;
+        read_text_from_buffer(text, delimiter, has_header, Some(rows))
     } else {
+        // Full staging read: whole file, decoded strictly.
         let bytes = std::fs::read(path)?;
         let text = decode_bytes(&bytes, charset)?;
-        read_text_from_buffer(text, delimiter, has_header, max_rows)
+        read_text_from_buffer(text, delimiter, has_header, None)
     }
 }
 
@@ -865,6 +893,20 @@ mod tests {
 1,2026-01-02,120.50,Acme Corp\n\
 2,2026-01-02,75.00,Globex\n\
 3,2026-01-03,240.00,Initech\n";
+
+    // ------------------------------------------------------------------
+    // Optimization guards (M-perf)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn clip_to_record_boundary_never_leaves_a_ragged_tail() {
+        // Ends with a newline: unchanged.
+        assert_eq!(clip_to_record_boundary(b"a,b\n1,2\n"), b"a,b\n1,2\n");
+        // Ends mid-record: the partial tail is dropped.
+        assert_eq!(clip_to_record_boundary(b"a,b\n1,2\n3,"), b"a,b\n1,2\n");
+        // No newline at all (single line): kept whole.
+        assert_eq!(clip_to_record_boundary(b"only,one,line"), b"only,one,line");
+    }
 
     // ------------------------------------------------------------------
     // M0 basics

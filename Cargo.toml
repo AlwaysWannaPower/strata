@@ -12,3 +12,10 @@ members = ["crates/strata-core", "crates/strata-app"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+
+# Rust, поэтому: thin-LTO + codegen-units=1 + strip — скорость и размер бинаря
+# в release; dev-сборка остаётся быстрой для итераций.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
