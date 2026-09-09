@@ -146,8 +146,12 @@ Datasets / Quality / Logs) на enum `Screen` + экраны-заглушки; �
 (файл или папка, reader-опции). ✅ *Партиции и Datasets-экран*: `source_to_parquet_partitioned` (Hive-папки
 `col=value/…` для строковой колонки), `folder_to_parquet_partitioned`,
 `list_parts`/`preview_parts` (рекурсивно), экран Datasets (части + превью);
-UI Folder-карточки получил опцию «Partition column». Осталось: применение схемы
-при stage (cast к типам), Excel (XLSX), `project.toml`, история в Logs.
+UI Folder-карточки получил опцию «Partition column». ✅ *project.toml* (`strata-core/src/project.rs`): create/open проекта
+(`project.toml` + `schemas/` + `logs/`), сохранение/загрузка/список схем
+(колонки + reader-опции токенами), тесты; экран Project в UI; Schemas →
+«Save schema to project»; общий сигнал проекта в App (переживает навигацию;
+файлы — на диске, переживают перезапуск). Осталось: применение схемы при
+stage (cast к типам), Excel (XLSX), история прогонов в Logs.
 
 ---
 

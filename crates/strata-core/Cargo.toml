@@ -7,4 +7,6 @@ description = "Data engine of the strata workbench: raw-file ingestion (CSV/TSV/
 [dependencies]
 polars = { version = "0.55", features = ["lazy", "csv", "parquet", "streaming", "fmt", "temporal", "polars-io"] }
 encoding_rs = "0.8"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 thiserror = "2"

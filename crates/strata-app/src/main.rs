@@ -38,13 +38,16 @@
 
 mod dataset_screen;
 pub(crate) mod preview;
+mod project_screen;
 mod schema_screen;
 pub(crate) mod sources;
 
 use dataset_screen::DatasetScreen;
 use dioxus::prelude::*;
+use project_screen::ProjectScreen;
 use schema_screen::SchemaScreen;
 use sources::SourcesScreen;
+use std::path::PathBuf;
 
 /// The five top-level screens. Navigation is a plain Rust enum: the compiler
 /// guarantees every screen is handled in the `match` below (no stringly-typed
@@ -75,7 +78,7 @@ impl Screen {
             Screen::Schema => "🧬",
             Screen::Datasets => "📦",
             Screen::Quality => "🛡",
-            Screen::Logs => "📜",
+            Screen::Logs => "🗂",
         }
     }
 
@@ -86,7 +89,7 @@ impl Screen {
             Screen::Schema => "Schemas",
             Screen::Datasets => "Datasets",
             Screen::Quality => "Quality",
-            Screen::Logs => "Logs",
+            Screen::Logs => "Project",
         }
     }
 }
@@ -108,6 +111,9 @@ fn main() {
 #[component]
 fn App() -> Element {
     let active = use_signal(|| Screen::Sources);
+    // Shared project directory. Lives here because two screens use it:
+    // Project (create/open/list) and Schemas (save schema into it).
+    let project = use_signal(|| Option::<PathBuf>::None);
 
     rsx! {
         // Inject the single global stylesheet (Dioxus renders it into the
@@ -134,18 +140,14 @@ fn App() -> Element {
                     // adding a screen = compiler reminder to handle it here.
                     match *active.read() {
                         Screen::Sources => rsx! { SourcesScreen {} },
-                        Screen::Schema => rsx! { SchemaScreen {} },
+                        Screen::Schema => rsx! { SchemaScreen { project } },
                         Screen::Datasets => rsx! { DatasetScreen {} },
                         Screen::Quality => rsx! { PlaceholderScreen {
                             title: "Quality",
                             text: "Data quality rules (NOT NULL, UNIQUE, RANGE, REGEX, …) and the \
                                    quarantine of broken rows are the M3 milestone."
                         } },
-                        Screen::Logs => rsx! { PlaceholderScreen {
-                            title: "Logs",
-                            text: "Run history per project/run arrives together with the project \
-                                   model (M1b+)."
-                        } },
+                        Screen::Logs => rsx! { ProjectScreen { project } },
                     }
                 }
             }

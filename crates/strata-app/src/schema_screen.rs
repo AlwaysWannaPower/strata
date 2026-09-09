@@ -18,13 +18,18 @@
 
 use dioxus::prelude::*;
 use std::path::PathBuf;
-use strata_core::{FolderSchema, SchemaProposal, schema_from_file, schema_from_folder};
+use strata_core::{
+    ColumnDef, FolderSchema, SchemaFile, SchemaProposal, save_schema, schema_from_file,
+    schema_from_folder,
+};
 
 use crate::sources::reader_options_from;
 
 /// The whole Schemas screen: one source row + results.
+/// `project` is the shared project signal from `App` (see `project_screen.rs`);
+/// when a project is open, a confirmed file schema can be saved into it.
 #[component]
-pub fn SchemaScreen() -> Element {
+pub fn SchemaScreen(project: Signal<Option<PathBuf>>) -> Element {
     // --- State (owned here; see the Dioxus notes in sources.rs) -----------
     let mut status = use_signal(String::new);
     let mut path_input = use_signal(String::new);
@@ -33,6 +38,7 @@ pub fn SchemaScreen() -> Element {
     let mut header_choice = use_signal(|| true);
     let mut file_schema = use_signal(|| Option::<SchemaProposal>::None);
     let mut folder_schema = use_signal(|| Option::<FolderSchema>::None);
+    let mut schema_source = use_signal(|| Option::<PathBuf>::None);
 
     // --- Behaviour ---------------------------------------------------------
     // Infer from whatever the path points at: a directory → folder-wide
@@ -84,6 +90,7 @@ pub fn SchemaScreen() -> Element {
                 Ok(proposal) => {
                     *folder_schema.write() = None;
                     *file_schema.write() = Some(proposal);
+                    *schema_source.write() = Some(path.clone());
                     status.set(format!(
                         "file: {} column(s) inferred",
                         file_schema
@@ -95,6 +102,38 @@ pub fn SchemaScreen() -> Element {
                 }
                 Err(err) => status.set(format!("schema failed: {err}")),
             }
+        }
+    };
+
+    // Save the confirmed schema into the currently open project (if any).
+    let mut save_current = move || {
+        let (Some(dir), Some(source), Some(proposal)) = (
+            project.read().clone(),
+            schema_source.read().clone(),
+            file_schema.read().clone(),
+        ) else {
+            status.set(String::from(
+                "open a project and infer a single-file schema first",
+            ));
+            return;
+        };
+        let options = reader_options_from(
+            &encoding_choice.read(),
+            &delimiter_choice.read(),
+            *header_choice.read(),
+        );
+        let columns = proposal
+            .columns
+            .into_iter()
+            .map(|c| ColumnDef {
+                name: c.name,
+                dtype: c.dtype,
+            })
+            .collect();
+        let schema = SchemaFile::new(source, options, columns);
+        match save_schema(&dir, &schema) {
+            Ok(file_name) => status.set(format!("schema saved as {file_name} in project")),
+            Err(err) => status.set(format!("save failed: {err}")),
         }
     };
 
@@ -177,6 +216,15 @@ pub fn SchemaScreen() -> Element {
                     }
                     div { class: "card-body",
                         SchemaColumnsTable { columns: proposal.columns.clone() }
+                        if project.read().is_some() {
+                            div { class: "toolbar",
+                                button { onclick: move |_| save_current(), "Save schema to project" }
+                            }
+                        } else {
+                            p { class: "empty-note",
+                                "Open a project first (Project screen) to save this schema."
+                            }
+                        }
                     }
                 }
             }

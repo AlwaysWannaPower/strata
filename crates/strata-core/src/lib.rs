@@ -51,6 +51,13 @@ pub use schema::{
     schema_from_folder,
 };
 
+/// Project persistence: `project.toml`, saved schemas, token helpers.
+pub mod project;
+pub use project::{
+    ColumnDef, ProjectMeta, SchemaFile, create_project, delimiter_from_token, delimiter_token,
+    encoding_from_token, encoding_token, load_schema, open_project, save_schema, schema_names,
+};
+
 // ---------------------------------------------------------------------------
 // Public domain types
 // ---------------------------------------------------------------------------
@@ -80,6 +87,14 @@ pub enum StrataError {
     /// A partitioning column must hold string values (M1b, partitioned writes).
     #[error("partition column must be a string column: {0}")]
     PartitionColumn(String),
+
+    /// A project directory already contains `project.toml`.
+    #[error("project already exists: {0}")]
+    ProjectExists(PathBuf),
+
+    /// Project/schema TOML could not be serialized or parsed.
+    #[error("project file error: {0}")]
+    ProjectFile(String),
 }
 
 /// Convenience alias used by every public function of this crate.
