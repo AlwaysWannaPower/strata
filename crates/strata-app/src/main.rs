@@ -37,6 +37,7 @@
 //! `docs/guide-1-dioxus.md`.
 
 mod dataset_screen;
+mod pipeline_home;
 pub(crate) mod preview;
 mod project_screen;
 mod schema_screen;
@@ -44,6 +45,7 @@ pub(crate) mod sources;
 
 use dataset_screen::DatasetScreen;
 use dioxus::prelude::*;
+use pipeline_home::PipelineHome;
 use project_screen::ProjectScreen;
 use schema_screen::SchemaScreen;
 use sources::SourcesScreen;
@@ -54,6 +56,7 @@ use std::path::PathBuf;
 /// routing for the desktop shell).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Screen {
+    Pipeline,
     Sources,
     Schema,
     Datasets,
@@ -63,7 +66,8 @@ enum Screen {
 
 impl Screen {
     /// All screens in navigation order (used to render the rail).
-    const ALL: [Screen; 5] = [
+    const ALL: [Screen; 6] = [
+        Screen::Pipeline,
         Screen::Sources,
         Screen::Schema,
         Screen::Datasets,
@@ -74,6 +78,7 @@ impl Screen {
     /// Small glyph shown next to the label in the rail.
     fn icon(self) -> &'static str {
         match self {
+            Screen::Pipeline => "🛠",
             Screen::Sources => "🗂",
             Screen::Schema => "🧬",
             Screen::Datasets => "📦",
@@ -85,6 +90,7 @@ impl Screen {
     /// Rail label.
     fn label(self) -> &'static str {
         match self {
+            Screen::Pipeline => "Pipeline",
             Screen::Sources => "Sources",
             Screen::Schema => "Schemas",
             Screen::Datasets => "Datasets",
@@ -139,6 +145,7 @@ fn App() -> Element {
                     // Render exactly one screen. `match` over the enum means
                     // adding a screen = compiler reminder to handle it here.
                     match *active.read() {
+                        Screen::Pipeline => rsx! { PipelineHome {} },
                         Screen::Sources => rsx! { SourcesScreen {} },
                         Screen::Schema => rsx! { SchemaScreen { project } },
                         Screen::Datasets => rsx! { DatasetScreen {} },
@@ -308,6 +315,11 @@ const CSS: &str = r#"
     .opt.checkbox { gap: 4px; cursor: pointer; }
     .mono { font-family: monospace; }
     .schema-h { margin: 14px 0 6px; font-size: 13px; color: #e2b93d; }
+    .entity-row { display: flex; align-items: center; justify-content: space-between;
+                  gap: 8px; border: 1px solid var(--line); border-radius: 6px;
+                  padding: 6px 10px; margin: 4px 0; background: var(--bg); }
+    .entity-main { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+    .entity-main strong { font-family: monospace; }
     .conflict { border: 1px solid var(--line); border-left: 3px solid #e2b93d;
                 border-radius: 6px; padding: 8px 10px; background: var(--bg); }
     .conflict-line { font-family: monospace; font-size: 12px; }

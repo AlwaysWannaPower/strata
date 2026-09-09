@@ -58,6 +58,13 @@ pub use project::{
     encoding_from_token, encoding_token, load_schema, open_project, save_schema, schema_names,
 };
 
+/// Workspace model (M1c): config + bindings + scan roots + entity candidates.
+pub mod workspace;
+pub use workspace::{
+    Binding, WorkspaceConfig, candidate_entity_name, create_workspace, data_dir,
+    list_entity_candidates, open_workspace, save_config, schemas_dir, upsert_binding,
+};
+
 // ---------------------------------------------------------------------------
 // Public domain types
 // ---------------------------------------------------------------------------
