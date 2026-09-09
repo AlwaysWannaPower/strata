@@ -143,9 +143,11 @@ Datasets / Quality / Logs) на enum `Screen` + экраны-заглушки; �
 заголовки»: `ReaderOptions.has_header`, чекбокс в UI). ✅ *Инференс схемы*:
 `strata-core/src/schema.rs` (`schema_from_file` / `schema_from_folder` — колонки+типы,
 конфликты типов между файлами, отсутствующие колонки, failed), экран Schemas в UI
-(файл или папка, reader-опции). Осталось: подтверждение/применение схемы при stage
-(cast к типам схемы), партиции датасета `year=…/month=…`, Excel (XLSX), `project.toml`,
-экран Datasets с браузером датасетов.
+(файл или папка, reader-опции). ✅ *Партиции и Datasets-экран*: `source_to_parquet_partitioned` (Hive-папки
+`col=value/…` для строковой колонки), `folder_to_parquet_partitioned`,
+`list_parts`/`preview_parts` (рекурсивно), экран Datasets (части + превью);
+UI Folder-карточки получил опцию «Partition column». Осталось: применение схемы
+при stage (cast к типам), Excel (XLSX), `project.toml`, история в Logs.
 
 ---
 

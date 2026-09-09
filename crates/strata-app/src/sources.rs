@@ -32,7 +32,8 @@ use dioxus::prelude::*;
 use std::path::PathBuf;
 use strata_core::{
     EncodingChoice, FolderReport, FolderScan, ImportReport, Preview, ReaderOptions,
-    folder_to_parquet, preview_parts, preview_source_with, scan_folder, source_to_parquet_with,
+    folder_to_parquet, folder_to_parquet_partitioned, list_parts, preview_parts,
+    preview_source_with, scan_folder, source_to_parquet_with,
 };
 
 use crate::preview::{PreviewCard, PreviewTable};
@@ -325,6 +326,8 @@ fn FolderCard() -> Element {
     let mut scan = use_signal(|| Option::<FolderScan>::None);
     let mut report = use_signal(|| Option::<FolderReport>::None);
     let mut dataset_preview = use_signal(|| Option::<Preview>::None);
+    // Optional Hive-style partition column (e.g. `city` or `date`). Empty = plain parts.
+    let mut partition_col = use_signal(String::new);
 
     // Scan the folder and remember the result for the UI.
     let mut scan_folder_at = move |dir: PathBuf| match scan_folder(&dir) {
@@ -342,16 +345,32 @@ fn FolderCard() -> Element {
     };
 
     // Stage every file of the scanned folder into a dataset directory of parts.
+    // With a partition column set, writes Hive folders `<col>=<value>/…` instead
+    // of flat parts; both layouts are readable through preview_parts (recursive).
     let mut stage_folder_at = move |dest_dir: PathBuf| {
         if scan.read().is_none() {
             status.set(String::from("scan a folder first"));
             return;
         }
         let src_dir = PathBuf::from(path_input.read().trim());
-        match folder_to_parquet(&src_dir, &dest_dir) {
+        let partition = partition_col.read().trim().to_string();
+
+        let result = if partition.is_empty() {
+            folder_to_parquet(&src_dir, &dest_dir)
+        } else {
+            folder_to_parquet_partitioned(&src_dir, &dest_dir, &partition)
+        };
+
+        match result {
             Ok(folder_report) => {
+                let parts_count = list_parts(&dest_dir).map(|p| p.len()).unwrap_or(0);
+                let layout = if partition.is_empty() {
+                    "parts"
+                } else {
+                    "partitioned"
+                };
                 let summary = format!(
-                    "staged {} file(s) → {} rows, {} skipped",
+                    "staged {} file(s) → {} rows, {} skipped ({layout}, {parts_count} part file(s))",
                     folder_report.staged.len(),
                     folder_report.total_rows,
                     folder_report.skipped.len()
@@ -360,10 +379,7 @@ fn FolderCard() -> Element {
                 match preview_parts(&dest_dir, PREVIEW_MAX_ROWS) {
                     Ok(table) => {
                         *dataset_preview.write() = Some(table);
-                        status.set(format!(
-                            "{summary}. Parts: {} skipped file(s) — see report.",
-                            folder_report.skipped.len()
-                        ));
+                        status.set(summary);
                     }
                     Err(err) => status.set(format!("{summary}. Preview failed: {err}")),
                 }
@@ -407,6 +423,20 @@ fn FolderCard() -> Element {
                         },
                         "Scan"
                     }
+                }
+
+                // Optional partition column (string) for Hive-style staging.
+                div { class: "toolbar opts",
+                    label { class: "opt",
+                        "Partition column "
+                        input {
+                            class: "mini-input",
+                            placeholder: "e.g. city or date (string)",
+                            value: partition_col,
+                            oninput: move |evt: Event<FormData>| partition_col.set(evt.value()),
+                        }
+                    }
+                    span { class: "hint", "Empty = flat part files" }
                 }
 
                 // File listing (from the scan; no data read yet).

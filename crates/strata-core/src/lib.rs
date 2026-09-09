@@ -39,7 +39,8 @@ use thiserror::Error;
 /// ([`folder::scan_folder`], [`folder::folder_to_parquet`], [`folder::preview_parts`]).
 pub mod folder;
 pub use folder::{
-    FileMeta, FolderReport, FolderScan, StagedFile, folder_to_parquet, preview_parts, scan_folder,
+    DatasetPart, FileMeta, FolderReport, FolderScan, StagedFile, folder_to_parquet,
+    folder_to_parquet_partitioned, list_parts, preview_parts, scan_folder,
 };
 
 /// Schema inference from files/folders ([`schema::schema_from_file`],
@@ -75,6 +76,10 @@ pub enum StrataError {
     /// The file bytes could not be decoded with the detected charset.
     #[error("cannot decode file: {0}")]
     Encoding(String),
+
+    /// A partitioning column must hold string values (M1b, partitioned writes).
+    #[error("partition column must be a string column: {0}")]
+    PartitionColumn(String),
 }
 
 /// Convenience alias used by every public function of this crate.
@@ -175,6 +180,8 @@ pub struct ImportReport {
     pub parquet_path: String,
     /// Provenance facts of the source that was staged.
     pub source: SourceInfo,
+    /// How many Parquet parts/partitions were written (1 = plain single file).
+    pub partitions: usize,
 }
 
 /// A text encoding the user can force instead of auto-detection.
@@ -293,7 +300,108 @@ pub fn source_to_parquet_with(
         source_files: 1,
         parquet_path: parquet_path.display().to_string(),
         source,
+        partitions: 1,
     })
+}
+
+/// Stage one file into a *partitioned* dataset directory.
+///
+/// Rows are grouped by the distinct values of `partition_column` (a string
+/// column, e.g. `date` = `2026-01-05` or `city` = `Moscow`) and each group is
+/// written under `<dest_root>/<column>=<value>/part-….parquet` — a
+/// Hive-style layout that downstream tools (Polars, DuckDB, …) read natively.
+///
+/// The column must be a Polars `String` column; anything else fails loudly
+/// with [`StrataError::PartitionColumn`] (partitioning needs clean, known
+/// values — a validator/ODS concern, not a raw-stage guess).
+pub fn source_to_parquet_partitioned(
+    path: &Path,
+    dest_root: &Path,
+    partition_column: &str,
+    options: ReaderOptions,
+) -> Result<ImportReport> {
+    let (frame, source) = open_any(path, options, None)?;
+    let column_series = frame.column(partition_column)?;
+    if !matches!(column_series.dtype(), DataType::String) {
+        return Err(StrataError::PartitionColumn(partition_column.to_string()));
+    }
+
+    // Distinct values in first-seen order (small; partition keys are low-cardinality).
+    let mut values: Vec<String> = Vec::new();
+    for index in 0..column_series.len() {
+        if let Ok(value) = column_series.get(index) {
+            let text = match &value {
+                AnyValue::String(text) => text.to_string(),
+                AnyValue::StringOwned(text) => text.to_string(),
+                _ => continue,
+            };
+            if !values.contains(&text) {
+                values.push(text);
+            }
+        }
+    }
+
+    std::fs::create_dir_all(dest_root)?;
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "source".to_string());
+
+    // Capture width before the loop: `DataFrame::lazy()` consumes the frame,
+    // so each iteration works on a cheap clone.
+    let total_columns = frame.width();
+    let mut rows_total = 0u64;
+    for (index, value) in values.iter().enumerate() {
+        // Hive naming: `<column>=<value>`; sanitize so no path separator/weird
+        // char can escape the partition directory.
+        let dir_name = format!(
+            "{}={}",
+            sanitize_partition_key(partition_column),
+            sanitize_partition_key(value)
+        );
+        let part_dir = dest_root.join(&dir_name);
+        std::fs::create_dir_all(&part_dir)?;
+
+        let group = frame
+            .clone()
+            .lazy()
+            .filter(col(partition_column).eq(lit(value.as_str())))
+            .collect()?;
+        let mut group = group;
+        rows_total += group.height() as u64;
+
+        let part_path = part_dir.join(format!("part-{index:04}-{stem}.parquet"));
+        let mut file = std::fs::File::create(&part_path)?;
+        let writer = ParquetWriter::new(&mut file);
+        writer.finish(&mut group)?;
+    }
+
+    Ok(ImportReport {
+        rows: rows_total,
+        columns: total_columns,
+        source_files: 1,
+        parquet_path: dest_root.display().to_string(),
+        source,
+        partitions: values.len(),
+    })
+}
+
+/// Replace characters that are unsafe in directory/file names with `_`.
+/// This keeps a Hive partition folder (`city=New York` → `city=New_York`)
+/// valid on every OS.
+fn sanitize_partition_key(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|ch| match ch {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0' => '_',
+            other => other,
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "_".to_string()
+    } else {
+        sanitized
+    }
 }
 
 /// Open any supported file into a materialized frame plus provenance.

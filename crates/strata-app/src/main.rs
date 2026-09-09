@@ -36,10 +36,12 @@
 //! language (see `PLAN.md` §5). Beginner explanations in Russian live in
 //! `docs/guide-1-dioxus.md`.
 
-mod preview;
+mod dataset_screen;
+pub(crate) mod preview;
 mod schema_screen;
 pub(crate) mod sources;
 
+use dataset_screen::DatasetScreen;
 use dioxus::prelude::*;
 use schema_screen::SchemaScreen;
 use sources::SourcesScreen;
@@ -133,11 +135,7 @@ fn App() -> Element {
                     match *active.read() {
                         Screen::Sources => rsx! { SourcesScreen {} },
                         Screen::Schema => rsx! { SchemaScreen {} },
-                        Screen::Datasets => rsx! { PlaceholderScreen {
-                            title: "Datasets",
-                            text: "Folder staging already writes Parquet part files (see Sources). \
-                                   Dataset browser and partitioning by year=…/month=… come next."
-                        } },
+                        Screen::Datasets => rsx! { DatasetScreen {} },
                         Screen::Quality => rsx! { PlaceholderScreen {
                             title: "Quality",
                             text: "Data quality rules (NOT NULL, UNIQUE, RANGE, REGEX, …) and the \
@@ -271,6 +269,10 @@ const CSS: &str = r#"
                   border: 1px solid var(--line); border-radius: 6px;
                   color: var(--text); padding: 6px 9px; font-family: monospace; }
     .path-input:focus { outline: none; border-color: var(--accent); }
+    .mini-input { background: var(--bg); border: 1px solid var(--line);
+                  border-radius: 6px; color: var(--text); padding: 3px 8px;
+                  font-size: 12px; font-family: monospace; }
+    .mini-input:focus { outline: none; border-color: var(--accent); }
     button { background: var(--panel2); border: 1px solid var(--line);
              border-radius: 6px; color: var(--text); padding: 6px 12px;
              cursor: pointer; font-size: 13px; }

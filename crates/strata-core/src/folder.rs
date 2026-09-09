@@ -201,7 +201,107 @@ pub fn folder_to_parquet(src_dir: &Path, dest_dir: &Path) -> Result<FolderReport
     })
 }
 
-/// Combined preview of a dataset directory (all `*.parquet` parts).
+/// Stage every file of `src_dir` into a **partitioned** dataset under
+/// `dest_root`, grouping rows by the distinct string values of
+/// `partition_column` (Hive-style `column=value/` directories).
+///
+/// Same ETL semantics as [`folder_to_parquet`]: good files → parts, unknown
+/// kinds / failing files → [`FolderReport::skipped`]. Each source file may
+/// produce several partition directories.
+pub fn folder_to_parquet_partitioned(
+    src_dir: &Path,
+    dest_root: &Path,
+    partition_column: &str,
+) -> Result<FolderReport> {
+    fs::create_dir_all(dest_root)?;
+    let scan = scan_folder(src_dir)?;
+
+    let mut staged = Vec::new();
+    let mut skipped = Vec::new();
+    let mut total_rows = 0u64;
+
+    for meta in scan.files.iter() {
+        if meta.kind == "Other" {
+            skipped.push((meta.name.clone(), String::from("unsupported file kind")));
+            continue;
+        }
+        let source_path = src_dir.join(&meta.name);
+        match crate::source_to_parquet_partitioned(
+            &source_path,
+            dest_root,
+            partition_column,
+            crate::ReaderOptions::default(),
+        ) {
+            Ok(report) => {
+                total_rows += report.rows;
+                staged.push(StagedFile {
+                    name: meta.name.clone(),
+                    part_path: report.parquet_path.clone(),
+                    rows: report.rows,
+                    columns: report.columns,
+                });
+            }
+            Err(err) => skipped.push((meta.name.clone(), err.to_string())),
+        }
+    }
+
+    Ok(FolderReport {
+        staged,
+        skipped,
+        total_rows,
+        dest_dir: dest_root.display().to_string(),
+    })
+}
+
+/// One Parquet part file inside a dataset directory (any nesting level).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatasetPart {
+    /// Path relative to the dataset root, e.g. `city=Moscow/part-0000-x.parquet`.
+    pub rel_path: String,
+    /// File size in bytes.
+    pub size_bytes: u64,
+}
+
+/// List every Parquet part under `dataset_dir`, recursively (partitioned
+/// datasets nest parts inside `column=value/` folders).
+///
+/// Sorted by relative path for a stable listing. Unknown folders/files other
+/// than `*.parquet` are ignored.
+pub fn list_parts(dataset_dir: &Path) -> Result<Vec<DatasetPart>> {
+    let mut found = Vec::new();
+    collect_parts(dataset_dir, dataset_dir, &mut found)?;
+    found.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    Ok(found)
+}
+
+fn collect_parts(root: &Path, dir: &Path, found: &mut Vec<DatasetPart>) -> Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            collect_parts(root, &path, found)?;
+        } else if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("parquet"))
+        {
+            let rel_path = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned();
+            let size_bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            found.push(DatasetPart {
+                rel_path,
+                size_bytes,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Combined preview of a dataset directory (all `*.parquet` parts, any
+/// nesting depth — plain part files and partitioned layouts).
 ///
 /// Parts are previewed in sorted order. A part whose columns differ from the
 /// first part is skipped (a schema mismatch is a *validation* concern — M2+ —
@@ -210,21 +310,16 @@ pub fn folder_to_parquet(src_dir: &Path, dest_dir: &Path) -> Result<FolderReport
 /// # Errors
 /// Returns [`crate::StrataError::Io`] if the directory cannot be read.
 pub fn preview_parts(dataset_dir: &Path, max_rows: usize) -> Result<Preview> {
-    let mut part_names: Vec<String> = fs::read_dir(dataset_dir)?
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| name.to_ascii_lowercase().ends_with(".parquet"))
-        .collect();
-    part_names.sort();
+    let parts = list_parts(dataset_dir)?;
 
     let mut columns: Option<Vec<ColumnInfo>> = None;
     let mut rows = Vec::new();
 
-    for name in part_names {
+    for part in parts {
         if rows.len() >= max_rows {
             break;
         }
-        let part_path = dataset_dir.join(name);
+        let part_path = dataset_dir.join(&part.rel_path);
         let Ok(preview) = preview_source(&part_path, max_rows - rows.len()) else {
             continue; // unreadable part: skip silently here; staging would report it
         };
@@ -240,7 +335,7 @@ pub fn preview_parts(dataset_dir: &Path, max_rows: usize) -> Result<Preview> {
     Ok(Preview {
         columns: columns.unwrap_or_default(),
         rows,
-        // Binary provenance; the UI adds the part count from the folder report.
+        // Binary provenance; the UI adds the part count from the listing.
         source: SourceInfo {
             kind: SourceKind::Parquet,
             encoding: String::from("— (binary)"),
@@ -333,6 +428,91 @@ mod tests {
         assert_eq!(preview.rows.len(), 6);
 
         let _ = fs::remove_dir_all(src);
+        let _ = fs::remove_dir_all(dest);
+    }
+
+    // ------------------------------------------------------------------
+    // M1b (step 2): partitioned dataset writes + recursive dataset listing
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn partitioned_staging_writes_hive_folders_per_value() {
+        let csv = temp_dir("part_src").join("sales.csv");
+        fs::create_dir_all(csv.parent().unwrap()).unwrap();
+        fs::write(&csv, "id,city\n1,Moscow\n2,Kazan\n3,Moscow\n4,Kazan\n").unwrap();
+        let dest = temp_dir("part_dst");
+
+        let report = crate::source_to_parquet_partitioned(
+            &csv,
+            &dest,
+            "city",
+            crate::ReaderOptions::default(),
+        )
+        .expect("partitioned staging succeeds");
+
+        assert_eq!(report.rows, 4);
+        assert_eq!(report.columns, 2);
+        assert_eq!(report.partitions, 2, "Moscow + Kazan");
+
+        // Hive-style folders exist and each holds a part file.
+        assert!(dest.join("city=Moscow").is_dir());
+        assert!(dest.join("city=Kazan").is_dir());
+        let parts = list_parts(&dest).expect("list parts");
+        assert_eq!(parts.len(), 2);
+
+        // Recursive combined preview sees every row again.
+        let preview = preview_parts(&dest, 100).expect("preview partitioned");
+        assert_eq!(preview.columns.len(), 2);
+        assert_eq!(preview.rows.len(), 4);
+
+        let _ = fs::remove_dir_all(csv.parent().unwrap());
+        let _ = fs::remove_dir_all(dest);
+    }
+
+    #[test]
+    fn partitioned_folder_staging_reports_rows_and_skips() {
+        let src = temp_dir("pfsrc");
+        fs::write(src.join("a.csv"), "id,city\n1,Moscow\n2,Kazan\n").unwrap();
+        fs::write(src.join("b.csv"), "id,city\n3,Moscow\n").unwrap();
+        fs::write(src.join("junk.dat"), b"\x00\x01").unwrap();
+        let dest = temp_dir("pfdst");
+
+        let report = folder_to_parquet_partitioned(&src, &dest, "city").expect("folder stage");
+        assert_eq!(report.staged.len(), 2);
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].0, "junk.dat");
+        assert_eq!(report.total_rows, 3);
+
+        // Both cities became partition folders, parts are found recursively.
+        assert!(dest.join("city=Moscow").is_dir());
+        assert!(dest.join("city=Kazan").is_dir());
+        assert_eq!(list_parts(&dest).expect("list").len(), 3); // 2 Moscow parts + 1 Kazan part
+
+        let _ = fs::remove_dir_all(src);
+        let _ = fs::remove_dir_all(dest);
+    }
+
+    #[test]
+    fn partitioning_requires_a_string_column() {
+        let csv = temp_dir("badpart").join("nums.csv");
+        fs::create_dir_all(csv.parent().unwrap()).unwrap();
+        fs::write(&csv, "id,amount\n1,12.5\n2,7.25\n").unwrap();
+        let dest = temp_dir("badpart_dst");
+
+        let err = crate::source_to_parquet_partitioned(
+            &csv,
+            &dest,
+            "amount", // Float64 — not partitionable in the raw layer
+            crate::ReaderOptions::default(),
+        )
+        .expect_err("numeric partition column must fail");
+
+        let crate::StrataError::PartitionColumn(name) = err else {
+            panic!("expected PartitionColumn error, got {err:?}");
+        };
+        assert_eq!(name, "amount");
+
+        let _ = fs::remove_dir_all(csv.parent().unwrap());
         let _ = fs::remove_dir_all(dest);
     }
 }
