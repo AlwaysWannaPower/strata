@@ -140,6 +140,7 @@ fn cheap_kind_label(path: &Path) -> String {
         "tsv" => "TSV".to_string(),
         "txt" => "Text".to_string(),
         "parquet" | "pq" => "Parquet".to_string(),
+        "xlsx" | "xls" => "Excel".to_string(),
         _ => "Other".to_string(),
     }
 }

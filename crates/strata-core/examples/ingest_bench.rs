@@ -14,7 +14,6 @@
 //! (e.g. after an optimization) rather than absolute truths.
 
 use std::io::Write;
-use std::path::PathBuf;
 use std::time::Instant;
 
 use strata_core::{preview_source, source_to_parquet};

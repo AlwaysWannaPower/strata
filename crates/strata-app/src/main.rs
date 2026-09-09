@@ -36,6 +36,8 @@
 //! language (see `PLAN.md` §5). Beginner explanations in Russian live in
 //! `docs/guide-1-dioxus.md`.
 
+#[allow(dead_code)]
+mod api;
 mod dataset_screen;
 mod pipeline_home;
 pub(crate) mod preview;

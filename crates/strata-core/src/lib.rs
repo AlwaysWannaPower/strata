@@ -58,6 +58,10 @@ pub use project::{
     encoding_from_token, encoding_token, load_schema, open_project, save_schema, schema_names,
 };
 
+/// Excel (XLSX/XLS) reading via calamine + the engine's CSV pipeline.
+pub mod excel;
+pub use excel::read_excel_frame;
+
 /// Workspace model (M1c): config + bindings + scan roots + entity candidates.
 pub mod workspace;
 pub use workspace::{
@@ -115,6 +119,8 @@ pub enum SourceKind {
     DelimitedText { delimiter: char },
     /// An Apache Parquet file (columnar, binary).
     Parquet,
+    /// An Excel workbook (first worksheet is read).
+    Excel,
 }
 
 impl SourceKind {
@@ -125,6 +131,7 @@ impl SourceKind {
             SourceKind::DelimitedText { delimiter: '\t' } => "TSV",
             SourceKind::DelimitedText { .. } => "Text",
             SourceKind::Parquet => "Parquet",
+            SourceKind::Excel => "Excel",
         }
     }
 }
@@ -164,6 +171,7 @@ impl SourceInfo {
                 )
             }
             SourceKind::Parquet => format!("{} · {}", self.kind.label(), self.encoding),
+            SourceKind::Excel => format!("{} · {}", self.kind.label(), self.encoding),
         }
     }
 }
@@ -449,6 +457,15 @@ fn open_any(
         return Ok((frame, source));
     }
 
+    if looks_like_excel(path) {
+        let frame = read_excel_frame(path, options.has_header, max_rows)?;
+        let source = SourceInfo {
+            kind: SourceKind::Excel,
+            encoding: String::from("— (workbook)"),
+        };
+        return Ok((frame, source));
+    }
+
     let (charset, delimiter) = resolve_text_parameters(&head, options)?;
     // Lazy streaming is only safe when we did *not* force an encoding: an
     // explicit choice must be validated strictly (decode the whole file), so
@@ -556,6 +573,13 @@ fn clip_to_record_boundary(bytes: &[u8]) -> &[u8] {
 
 /// A Parquet file is identified by its magic bytes (`PAR1` at offset 0),
 /// with the extension as a fallback hint for truncated reads.
+/// An Excel workbook is detected by extension (XLSX/XLS).
+fn looks_like_excel(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "xlsx" | "xls"))
+}
+
 fn looks_like_parquet(path: &Path, head: &[u8]) -> bool {
     if head.starts_with(b"PAR1") {
         return true;
