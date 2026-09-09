@@ -112,3 +112,33 @@ pub fn PreviewCard(props: PreviewCardProps) -> Element {
         }
     }
 }
+
+/// Props of [`ColumnsTable`]: plain `(name, type)` rows.
+#[derive(Props, Clone, PartialEq)]
+pub struct ColumnsTableProps {
+    rows: Vec<(String, String)>,
+}
+
+/// Render `(column, type)` pairs as a small two-column table.
+///
+/// Both schema *proposals* (`SchemaColumn`) and *saved schemas* (`ColumnDef`)
+/// carry the same name+type shape, so callers map them into pairs and reuse
+/// this single presentational component.
+#[component]
+pub fn ColumnsTable(props: ColumnsTableProps) -> Element {
+    rsx! {
+        div { class: "table-wrap",
+            table { class: "grid",
+                thead { tr { th { "Column" } th { "Type" } } }
+                tbody {
+                    for (name, dtype) in &props.rows {
+                        tr {
+                            td { "{name}" }
+                            td { class: "mono", "{dtype}" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
