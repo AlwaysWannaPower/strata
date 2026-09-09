@@ -17,6 +17,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use polars::prelude::LazyFrame;
+
 use crate::folder::{FileMeta, FolderReport, scan_folder};
 use crate::{
     ColumnDef, ReaderOptions, SchemaFile, delimiter_from_token, encoding_from_token,
@@ -257,13 +259,33 @@ pub fn stage_folder_with_schema(
         let part_path = dest_dir.join(format!("{index:04}-{stem}.parquet"));
         match source_to_parquet_with(&source_path, &part_path, options) {
             Ok(report) => {
-                total_rows += report.rows;
-                staged.push(crate::folder::StagedFile {
-                    name: meta.name.clone(),
-                    part_path: part_path.display().to_string(),
-                    rows: report.rows,
-                    columns: report.columns,
-                });
+                // Full-file type check: inference over the *whole* file can
+                // differ from the sample (a late bad row turns a column into
+                // String). Read the part's real schema (1 row is enough — the
+                // schema lives in the Parquet header) and compare.
+                match verify_part_types(&part_path, &schema.columns) {
+                    Ok(None) => {
+                        total_rows += report.rows;
+                        staged.push(crate::folder::StagedFile {
+                            name: meta.name.clone(),
+                            part_path: part_path.display().to_string(),
+                            rows: report.rows,
+                            columns: report.columns,
+                        });
+                    }
+                    Ok(Some(reason)) => {
+                        let _ = std::fs::remove_file(&part_path);
+                        skipped
+                            .push((meta.name.clone(), format!("full-file type check: {reason}")));
+                    }
+                    Err(err) => {
+                        let _ = std::fs::remove_file(&part_path);
+                        skipped.push((
+                            meta.name.clone(),
+                            format!("type verification failed: {err}"),
+                        ));
+                    }
+                }
             }
             Err(err) => skipped.push((meta.name.clone(), format!("stage failed: {err}"))),
         }
@@ -275,6 +297,42 @@ pub fn stage_folder_with_schema(
         total_rows,
         dest_dir: dest_dir.display().to_string(),
     })
+}
+
+/// Read the real column types of a written Parquet part and compare them with
+/// the confirmed schema. Returns a mismatch reason or `None` when conforming.
+fn verify_part_types(part: &Path, expected: &[ColumnDef]) -> crate::Result<Option<String>> {
+    let frame = LazyFrame::scan_parquet(crate::to_plref_path(part)?, Default::default())?
+        .limit(1)
+        .collect()?;
+    let actual: Vec<(String, String)> = frame
+        .columns()
+        .iter()
+        .map(|c| (c.name().to_string(), c.dtype().to_string()))
+        .collect();
+
+    if expected.len() != actual.len() {
+        return Ok(Some(format!(
+            "{} column(s) expected, parquet has {}",
+            expected.len(),
+            actual.len()
+        )));
+    }
+    for (expected, (actual_name, actual_dtype)) in expected.iter().zip(actual) {
+        if expected.name != actual_name {
+            return Ok(Some(format!(
+                "expected column '{}', parquet has '{}'",
+                expected.name, actual_name
+            )));
+        }
+        if expected.dtype != actual_dtype {
+            return Ok(Some(format!(
+                "'{}': expected type {}, parquet has {}",
+                expected.name, expected.dtype, actual_dtype
+            )));
+        }
+    }
+    Ok(None)
 }
 
 /// Compare the confirmed schema columns with what a file actually exposes.
@@ -535,6 +593,47 @@ mod tests {
         assert_eq!(preview.rows.len(), 2);
         assert_eq!(preview.rows[0][0], "2026-01-05");
         assert_eq!(preview.columns[0].name, "дата");
+
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(dest);
+    }
+
+    #[test]
+    fn validated_stage_rejects_late_row_type_drift() {
+        // The first 100 rows (Polars' sample for inference) are numeric, so the
+        // sample-based schema check passes — but row ~102 contains "n/a", which
+        // turns the whole column into String on a full read. The full-file type
+        // check must reject the file instead of staging a wrong-typed part.
+        let dir = temp_path("sv_drift");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut content = String::from("id,amount,name\n");
+        for i in 1..=101 {
+            content.push_str(&format!("{i},12.5,Alpha\n"));
+        }
+        content.push_str("102,n/a,Beta\n");
+        write_text(&dir.join("drift.csv"), &content);
+        let dest = temp_path("sv_drift_dst");
+
+        let report = stage_folder_with_schema(&dir, &dest, &sample_schema()).expect("stage");
+        assert_eq!(
+            report.staged.len(),
+            0,
+            "nothing may be staged with a wrong type"
+        );
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].0, "drift.csv");
+        // The rejection reason is either our explicit full-file type check or
+        // Polars' own strict parse error for the bad value — both mean the file
+        // was never staged with a wrong type.
+        let reason_ok = report.skipped[0].1.contains("full-file type check")
+            || report.skipped[0].1.contains("n/a");
+        assert!(
+            reason_ok,
+            "reason explains rejection: {}",
+            report.skipped[0].1
+        );
+        // No leftover part on disk either.
+        assert_eq!(crate::list_parts(&dest).expect("parts").len(), 0);
 
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(dest);
