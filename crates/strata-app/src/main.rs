@@ -1,297 +1,305 @@
-//! # strata-app — the Strata desktop shell (Dioxus 0.7, WebView).
+//! # strata-app — the Strata desktop shell (Dioxus 0.7, WebView)
 //!
 //! This binary is deliberately thin: every data operation lives in
-//! [`strata_core`] and is reached through its small public API
-//! ([`strata_core::preview_source`], [`strata_core::source_to_parquet`]). The UI
-//! only renders plain data structures and forwards user intent.
+//! [`strata_core`]. The UI only renders plain data structures and forwards
+//! user intent.
 //!
-//! ## M0.1 screen
+//! ## Layout of this crate (read top-down)
 //!
 //! ```text
-//!  [ path to CSV / TSV / Parquet …        ] [Browse…] [Open]
-//!  …or open the bundled demo:  [Load sample]
-//!  ┌───────────────────────────────────────────────────┐
-//!  │ CSV · delimiter ';' · windows-1251   ← provenance │
-//!  │ preview table: columns + first rows                │
-//!  └───────────────────────────────────────────────────┘
-//!  [Stage to Parquet]   status / import report
+//! src/
+//! ├── main.rs      — entry point, App frame, navigation rail, CSS,
+//! │                  placeholder screens (Schema/Datasets/Quality/Logs)
+//! ├── sources.rs   — the "Sources" screen: single-file card + folder card
+//! └── preview.rs   — reusable presentational components (PreviewCard/Table)
 //! ```
 //!
-//! The toolbar is one coherent "add a source" widget: the path field is the
-//! single place a source gets named — `Browse…` only fills it, `Open` imports
-//! what it contains. No duplicate "open a file" buttons.
+//! ## How a Dioxus desktop app is structured (0.7)
 //!
-//! UI copy is English on purpose: code, comments and user-facing strings stay
-//! in one language (see `PLAN.md` §5); only the `docs/` guides are in Russian.
+//! 1. `main()` builds the platform ("desktop" = system WebView) and launches
+//!    the root component [`App`]. `launch` blocks the main thread and runs the
+//!    event loop until the window closes.
+//! 2. [`App`] is the **root component**. A component is a plain function
+//!    annotated `#[component]` that returns an `Element` (a virtual node).
+//!    Dioxus re-runs the function when its reactive state changes and diffs
+//!    the output — declarative UI, no manual DOM updates.
+//! 3. State lives in **signals** (`use_signal`). Reading: `sig.read()`;
+//!    writing: `sig.set(v)` / `*sig.write() = v`; each write schedules a
+//!    re-render of the components that read the signal.
+//! 4. Screens are components too. [`App`] owns one small piece of state — the
+//!    *active screen* — and renders exactly one screen at a time via a match.
+//!    This is "state as low as possible": only truly global state lives here.
+//!
+//! ## UI copy
+//!
+//! English on purpose: code, comments and user-facing strings stay in one
+//! language (see `PLAN.md` §5). Beginner explanations in Russian live in
+//! `docs/guide-1-dioxus.md`.
+
+mod preview;
+mod sources;
 
 use dioxus::prelude::*;
-use std::path::PathBuf;
-use strata_core::{ImportReport, Preview, preview_source, source_to_parquet};
+use sources::SourcesScreen;
 
-/// The number of rows the preview shows. It is a small constant on purpose:
-/// the preview must never read more than a bounded prefix of a file.
-const PREVIEW_MAX_ROWS: usize = 50;
+/// The five top-level screens. Navigation is a plain Rust enum: the compiler
+/// guarantees every screen is handled in the `match` below (no stringly-typed
+/// routing for the desktop shell).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Screen {
+    Sources,
+    Schema,
+    Datasets,
+    Quality,
+    Logs,
+}
 
-/// Name of the bundled demo file, relative to `examples/sample_csv/` at the
-/// repository root (see [`sample_csv_path`]).
-const SAMPLE_FILE_NAME: &str = "sales_01.csv";
+impl Screen {
+    /// All screens in navigation order (used to render the rail).
+    const ALL: [Screen; 5] = [
+        Screen::Sources,
+        Screen::Schema,
+        Screen::Datasets,
+        Screen::Quality,
+        Screen::Logs,
+    ];
 
-/// Application entry point.
-///
-/// `LaunchBuilder::desktop()` selects the desktop (WebView) platform; because
-/// `strata-app` enables only the `desktop` feature of Dioxus, there is exactly
-/// one renderer to choose. `launch` blocks the main thread and runs the event
-/// loop until the window closes.
+    /// Small glyph shown next to the label in the rail.
+    fn icon(self) -> &'static str {
+        match self {
+            Screen::Sources => "🗂",
+            Screen::Schema => "🧬",
+            Screen::Datasets => "📦",
+            Screen::Quality => "🛡",
+            Screen::Logs => "📜",
+        }
+    }
+
+    /// Rail label.
+    fn label(self) -> &'static str {
+        match self {
+            Screen::Sources => "Sources",
+            Screen::Schema => "Schemas",
+            Screen::Datasets => "Datasets",
+            Screen::Quality => "Quality",
+            Screen::Logs => "Logs",
+        }
+    }
+}
+
+/// Application entry point. `LaunchBuilder::desktop()` picks the desktop
+/// renderer (only the `desktop` feature is enabled, so there is exactly one).
 fn main() {
     dioxus::LaunchBuilder::desktop().launch(App);
 }
 
-/// Path of the bundled sample CSV.
+/// Root component: brand header + navigation rail + the active screen.
 ///
-/// `CARGO_MANIFEST_DIR` is the directory of *this* crate's manifest
-/// (`crates/strata-app/`), so the sample lives two levels up in
-/// `examples/sample_csv/`. The check with `try_exists` turns a path mistake
-/// (repo moved, different layout) into a clear error instead of a panic.
-fn sample_csv_path() -> Result<PathBuf, String> {
-    let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples/sample_csv")
-        .join(SAMPLE_FILE_NAME);
-    match candidate.try_exists() {
-        Ok(true) => Ok(candidate),
-        Ok(false) => Err(format!("sample file not found at {}", candidate.display())),
-        Err(err) => Err(format!("cannot inspect {}: {err}", candidate.display())),
-    }
-}
-
-/// Native "open file" dialog offering every format the raw layer understands.
-fn open_file_dialog() -> Option<PathBuf> {
-    rfd::FileDialog::new()
-        .set_title("Open a source file (CSV / TSV / Parquet)")
-        .add_filter("Delimited text (CSV/TSV)", &["csv", "tsv", "txt"])
-        .add_filter("Parquet", &["parquet"])
-        .add_filter("All files", &["*"])
-        .pick_file()
-}
-
-/// Native "save file" dialog, pre-filled with a sensible Parquet name.
-fn save_parquet_dialog(default_name: &str) -> Option<PathBuf> {
-    rfd::FileDialog::new()
-        .set_title("Stage to a Parquet file")
-        .set_file_name(default_name)
-        .add_filter("Parquet files", &["parquet"])
-        .save_file()
-}
-
-/// The root component. Owns all UI state as Dioxus signals.
+/// ## State here vs state in screens
 ///
-/// State kept here (one place, visible at a glance):
-/// * `status`      — last human-readable message or error;
-/// * `path_input`  — text the user typed/picked into the source field;
-/// * `preview`     — loaded table (columns + rows) or `None` before any load;
-/// * `report`      — result of the last stage run or `None`;
-/// * `source_path` — canonical path of the currently previewed file.
+/// [`App`] holds exactly one signal: which screen is visible. Everything else
+/// (previews, reports, inputs) belongs to the screen that uses it and lives
+/// inside that screen's component — see `sources.rs`. This keeps state local
+/// and makes components reusable.
 #[component]
 fn App() -> Element {
-    let mut status = use_signal(String::new);
-    let mut path_input = use_signal(String::new);
-    let mut preview = use_signal(|| Option::<Preview>::None);
-    let mut report = use_signal(|| Option::<ImportReport>::None);
-    let mut source_path = use_signal(|| Option::<PathBuf>::None);
-
-    // Import a source into the preview. Shared by Browse→Open, the sample
-    // button and the typed path — one code path means one behaviour.
-    let mut import_from = move |path: PathBuf| {
-        match preview_source(&path, PREVIEW_MAX_ROWS) {
-            Ok(table) => {
-                let shown = table.rows.len();
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.display().to_string());
-                // Provenance line: format, delimiter, encoding — the user can
-                // verify the raw layer read the file the way they expect.
-                let provenance = table.source.summary();
-                let message = if shown == 0 {
-                    format!("{name}: {provenance} — file has no data rows")
-                } else {
-                    format!("{name}: {provenance} — showing {shown} row(s)")
-                };
-                *preview.write() = Some(table);
-                *source_path.write() = Some(path);
-                *report.write() = None;
-                status.set(message);
-            }
-            Err(err) => {
-                status.set(format!("cannot import {}: {err}", path.display()));
-            }
-        }
-    };
-
-    // Stage the currently previewed source to Parquet (raw layer, no rules).
-    let mut stage_to_parquet = move |parquet_path: PathBuf| {
-        let Some(source) = source_path.read().clone() else {
-            status.set(String::from("import a source first"));
-            return;
-        };
-        match source_to_parquet(&source, &parquet_path) {
-            Ok(report_data) => {
-                status.set(format!(
-                    "staged {} rows x {} columns → {} [{}]",
-                    report_data.rows,
-                    report_data.columns,
-                    report_data.parquet_path,
-                    report_data.source.summary(),
-                ));
-                *report.write() = Some(report_data);
-            }
-            Err(err) => status.set(format!("staging failed: {err}")),
-        }
-    };
+    let active = use_signal(|| Screen::Sources);
 
     rsx! {
+        // Inject the single global stylesheet (Dioxus renders it into the
+        // document head; raw CSS as one const keeps a tiny app self-contained).
         document::Style { "{CSS}" }
+
         div { class: "app",
             header { class: "topbar",
-                h1 { "Strata — Data Engineering Workbench" }
-                p { class: "subtitle", "Raw layer (staging): File → Parquet · no business rules applied" }
+                div { class: "brand",
+                    h1 { "Strata" }
+                    span { class: "tagline", "Data Engineering Workbench" }
+                }
+                span { class: "layers", "Raw (staging) · no business rules · rules at ODS" }
             }
 
-            // ---- Source widget: one place to name the input file -----------
-            div { class: "toolbar sourcebar",
-                input {
-                    class: "path-input",
-                    placeholder: "Path to CSV / TSV / Parquet file…",
-                    value: path_input,
-                    oninput: move |evt: Event<FormData>| path_input.set(evt.value()),
-                }
-                button {
-                    onclick: move |_| {
-                        if let Some(path) = open_file_dialog() {
-                            path_input.set(path.display().to_string());
-                        }
-                    },
-                    "Browse…"
-                }
-                button {
-                    onclick: move |_| {
-                        let text = path_input.read().trim().to_string();
-                        if text.is_empty() {
-                            status.set(String::from("type a path or use Browse…"));
-                        } else {
-                            import_from(PathBuf::from(text));
-                        }
-                    },
-                    "Open"
-                }
-            }
+            div { class: "body",
+                // Navigation rail: one button per Screen variant.
+                // `active` is passed down by value because Signal<Screen> is
+                // Copy — cheap, and the rail can set it on click.
+                NavRail { active }
 
-            div { class: "toolbar hints",
-                span { class: "hint", "…or open the bundled demo:" }
-                button {
-                    onclick: move |_| {
-                        match sample_csv_path() {
-                            Ok(path) => {
-                                path_input.set(path.display().to_string());
-                                import_from(path);
-                            }
-                            Err(err) => status.set(err),
-                        }
-                    },
-                    "Load sample"
-                }
-            }
-
-            if let Some(table) = preview.read().as_ref() {
-                div { class: "panel",
-                    h2 { class: "panel-title", "Preview — {table.source.summary()}" }
-                    table { class: "grid",
-                        thead {
-                            tr {
-                                for column in &table.columns {
-                                    th { "{column.name}" }
-                                }
-                            }
-                        }
-                        tbody {
-                            for row in &table.rows {
-                                tr {
-                                    for cell in row {
-                                        td { "{cell}" }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                div { class: "toolbar",
-                    button {
-                        onclick: move |_| {
-                            // Default name: source stem + .parquet in the same folder.
-                            let source = source_path.read().clone().unwrap_or_default();
-                            let default_name = source
-                                .file_stem()
-                                .map(|s| format!("{}.parquet", s.to_string_lossy()))
-                                .unwrap_or_else(|| "staged.parquet".to_string());
-                            if let Some(path) = save_parquet_dialog(&default_name) {
-                                stage_to_parquet(path);
-                            }
-                        },
-                        "Stage to Parquet"
+                main { class: "content",
+                    // Render exactly one screen. `match` over the enum means
+                    // adding a screen = compiler reminder to handle it here.
+                    match *active.read() {
+                        Screen::Sources => rsx! { SourcesScreen {} },
+                        Screen::Schema => rsx! { PlaceholderScreen {
+                            title: "Schemas",
+                            text: "Shared schemas arrive in M1b: schema inference across files, \
+                                   column types, conflicts, and manual encoding/delimiter overrides."
+                        } },
+                        Screen::Datasets => rsx! { PlaceholderScreen {
+                            title: "Datasets",
+                            text: "Folder staging already writes Parquet part files (see Sources). \
+                                   Dataset browser and partitioning by year=…/month=… come next."
+                        } },
+                        Screen::Quality => rsx! { PlaceholderScreen {
+                            title: "Quality",
+                            text: "Data quality rules (NOT NULL, UNIQUE, RANGE, REGEX, …) and the \
+                                   quarantine of broken rows are the M3 milestone."
+                        } },
+                        Screen::Logs => rsx! { PlaceholderScreen {
+                            title: "Logs",
+                            text: "Run history per project/run arrives together with the project \
+                                   model (M1b+)."
+                        } },
                     }
                 }
             }
-
-            if let Some(report) = report.read().as_ref() {
-                div { class: "report",
-                    strong { "Import report" }
-                    p { "Rows: {report.rows} · Columns: {report.columns} · File: {report.parquet_path}" }
-                }
-            }
-
-            div { class: "status", "{status}" }
         }
     }
 }
 
-/// A small stylesheet. Inline on purpose: M0 ships a single window with no
-/// asset pipeline yet. Dark theme, monospace data grid.
+/// Props of [`NavRail`]: the one signal it may change.
+#[derive(Props, Clone, PartialEq)]
+struct NavRailProps {
+    /// Currently active screen. Passed as a `Signal` (Copy), so the rail can
+    /// both read it (to highlight) and write it (to navigate).
+    active: Signal<Screen>,
+}
+
+/// The left navigation rail: one button per [`Screen`].
+#[component]
+fn NavRail(props: NavRailProps) -> Element {
+    // Signal<Screen> is Copy: take it out of the props struct once so the
+    // closures below can call `active.set(...)` (which needs `&mut`) without
+    // making the whole props struct mutable.
+    let mut active = props.active;
+    rsx! {
+        nav { class: "nav",
+            for screen in Screen::ALL {
+                // Dynamic class list: `active` highlight depends on current value.
+                button {
+                    class: if *active.read() == screen { "nav-item active" } else { "nav-item" },
+                    onclick: move |_| active.set(screen),
+                    span { class: "nav-icon", "{screen.icon()}" }
+                    "{screen.label()}"
+                }
+            }
+        }
+    }
+}
+
+/// Props of [`PlaceholderScreen`] — a plain-text stand-in until a real screen
+/// is implemented (keeps the shell navigable from the start).
+#[derive(Props, Clone, PartialEq)]
+struct PlaceholderScreenProps {
+    title: &'static str,
+    text: &'static str,
+}
+
+#[component]
+fn PlaceholderScreen(props: PlaceholderScreenProps) -> Element {
+    rsx! {
+        div { class: "screen",
+            h1 { class: "screen-title", "{props.title}" }
+            p { class: "screen-sub", "{props.text}" }
+        }
+    }
+}
+
+/// The whole application stylesheet.
+///
+/// Dioxus desktop renders into a WebView, so this is regular CSS. Class names
+/// used across `main.rs`, `sources.rs` and `preview.rs` are all defined here —
+/// one place to tweak the look (M4 will split themes/tokens, not needed yet).
 const CSS: &str = r#"
     :root {
-        --bg: #101418; --panel: #161c22; --line: #2a333d;
+        --bg: #0e1216; --panel: #151b22; --panel2: #1a2129; --line: #2a333d;
         --text: #d7dee6; --muted: #8b98a5; --accent: #4da3ff;
     }
     * { box-sizing: border-box; }
     body { margin: 0; background: var(--bg); color: var(--text);
-           font-family: system-ui, sans-serif; }
-    .app { display: flex; flex-direction: column; gap: 8px;
-           padding: 14px; height: 100vh; }
-    .topbar h1 { margin: 0; font-size: 18px; }
-    .topbar .subtitle { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+           font-family: system-ui, sans-serif; font-size: 14px; }
+
+    /* ---- app frame ---------------------------------------------------- */
+    .app { display: flex; flex-direction: column; height: 100vh; }
+    .topbar { display: flex; align-items: center; justify-content: space-between;
+              padding: 10px 16px; border-bottom: 1px solid var(--line);
+              background: var(--panel); }
+    .brand { display: flex; align-items: baseline; gap: 10px; }
+    .brand h1 { margin: 0; font-size: 18px; letter-spacing: 0.3px; }
+    .tagline { color: var(--muted); font-size: 12px; }
+    .layers { color: var(--muted); font-size: 12px; font-family: monospace; }
+    .body { display: flex; flex: 1; min-height: 0; }
+
+    /* ---- navigation rail ---------------------------------------------- */
+    .nav { display: flex; flex-direction: column; gap: 4px; width: 200px;
+           padding: 12px 8px; border-right: 1px solid var(--line);
+           background: var(--panel); flex-shrink: 0; overflow-y: auto; }
+    .nav-item { display: flex; gap: 8px; align-items: center; text-align: left;
+                background: transparent; border: 1px solid transparent;
+                border-radius: 6px; color: var(--text); padding: 8px 10px;
+                cursor: pointer; font-size: 13px; }
+    .nav-item:hover { background: var(--panel2); }
+    .nav-item.active { background: var(--panel2); border-color: var(--line);
+                       color: var(--accent); }
+    .nav-icon { width: 18px; text-align: center; }
+
+    /* ---- content area -------------------------------------------------- */
+    .content { flex: 1; overflow-y: auto; padding: 16px 18px; }
+    .screen { display: flex; flex-direction: column; gap: 10px;
+              max-width: 1080px; }
+    .screen-title { margin: 0; font-size: 20px; }
+    .screen-sub { margin: 0; color: var(--muted); max-width: 760px;
+                  line-height: 1.45; }
+
+    /* ---- cards ---------------------------------------------------------- */
+    .card { background: var(--panel); border: 1px solid var(--line);
+            border-radius: 10px; overflow: hidden; }
+    .card-head { display: flex; align-items: center; gap: 8px;
+                 padding: 8px 12px; border-bottom: 1px solid var(--line);
+                 background: var(--panel2); }
+    .card-title { font-weight: 600; font-size: 13px; text-transform: uppercase;
+                  letter-spacing: 0.4px; color: var(--muted); }
+    .card-badge { font-family: monospace; font-size: 11px; color: var(--accent);
+                  border: 1px solid var(--line); border-radius: 4px;
+                  padding: 1px 6px; }
+    .card-body { display: flex; flex-direction: column; gap: 8px; padding: 12px; }
+    .provenance { font-family: monospace; font-size: 12px; color: var(--accent); }
+
+    /* ---- toolbar/inputs ------------------------------------------------- */
     .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-    .sourcebar { border: 1px solid var(--line); border-radius: 8px;
-                 padding: 8px; background: var(--panel); }
+    .hints { margin-top: -2px; }
+    .hint { color: var(--muted); font-size: 12px; }
     .path-input { flex: 1; min-width: 260px; background: var(--bg);
                   border: 1px solid var(--line); border-radius: 6px;
-                  color: var(--text); padding: 6px 8px; font-family: monospace; }
-    .hints .hint { color: var(--muted); font-size: 12px; }
-    button { background: var(--bg); border: 1px solid var(--line);
+                  color: var(--text); padding: 6px 9px; font-family: monospace; }
+    .path-input:focus { outline: none; border-color: var(--accent); }
+    button { background: var(--panel2); border: 1px solid var(--line);
              border-radius: 6px; color: var(--text); padding: 6px 12px;
-             cursor: pointer; }
+             cursor: pointer; font-size: 13px; }
     button:hover { border-color: var(--accent); }
-    .panel { background: var(--panel); border: 1px solid var(--line);
-             border-radius: 8px; padding: 10px; overflow: auto; flex: 1; }
-    .panel-title { margin: 0 0 8px; font-size: 13px; color: var(--muted);
-                font-weight: 600; font-family: monospace; }
-    table.grid { border-collapse: collapse; font-family: monospace; font-size: 13px;
+
+    /* ---- tables ---------------------------------------------------------- */
+    .table-wrap { overflow: auto; border: 1px solid var(--line);
+                  border-radius: 8px; background: var(--bg); }
+    table.grid { border-collapse: collapse; font-family: monospace; font-size: 12px;
                  width: 100%; }
-    table.grid th, table.grid td { border: 1px solid var(--line);
-                 padding: 3px 8px; text-align: left; white-space: nowrap; }
-    table.grid th { position: sticky; top: 0; background: var(--panel);
-                 color: var(--muted); font-weight: 600; }
-    table.grid tbody tr:nth-child(even) { background: #1a2129; }
-    .report { background: var(--panel); border: 1px solid var(--line);
-              border-radius: 8px; padding: 8px 12px; font-size: 13px; }
+    table.grid th, table.grid td { border-bottom: 1px solid var(--line);
+                 padding: 4px 10px; text-align: left; white-space: nowrap; }
+    table.grid th { position: sticky; top: 0; background: var(--panel2);
+                 color: var(--muted); font-weight: 600; z-index: 1; }
+    table.grid tbody tr:hover { background: var(--panel2); }
+    table.grid.files td { white-space: nowrap; }
+    .empty-note { color: var(--muted); font-style: italic; padding: 6px 2px;
+                  font-size: 12px; }
+
+    /* ---- reports/status --------------------------------------------------- */
+    .report { background: var(--panel2); border: 1px solid var(--line);
+              border-radius: 8px; padding: 8px 12px; font-size: 12px; }
     .report p { margin: 2px 0 0; font-family: monospace; }
-    .status { color: var(--muted); font-size: 13px; min-height: 1em;
+    .report ul { margin: 6px 0 0; padding-left: 18px; color: #ef6a6a;
+                 font-size: 12px; }
+    .report strong { color: var(--muted); text-transform: uppercase;
+                     font-size: 11px; letter-spacing: 0.4px; }
+    .status { color: var(--muted); font-size: 12px; min-height: 1.1em;
               font-family: monospace; white-space: pre-wrap; }
 "#;

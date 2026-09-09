@@ -35,6 +35,13 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+/// Folder sources: a directory becomes one dataset directory of Parquet parts
+/// ([`folder::scan_folder`], [`folder::folder_to_parquet`], [`folder::preview_parts`]).
+pub mod folder;
+pub use folder::{
+    FileMeta, FolderReport, FolderScan, StagedFile, folder_to_parquet, preview_parts, scan_folder,
+};
+
 // ---------------------------------------------------------------------------
 // Public domain types
 // ---------------------------------------------------------------------------
