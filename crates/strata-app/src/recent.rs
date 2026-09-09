@@ -31,7 +31,7 @@ fn recent_file() -> PathBuf {
 }
 
 /// The platform config directory (see module docs).
-fn config_dir() -> PathBuf {
+pub(crate) fn config_dir() -> PathBuf {
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
         return PathBuf::from(xdg);
     }

@@ -61,8 +61,55 @@ use pipeline_home::PipelineHome;
 
 /// Application entry point. `LaunchBuilder::desktop()` picks the desktop
 /// renderer (only the `desktop` feature is enabled, so there is exactly one).
+///
+/// Before launching we install a panic hook that also appends the panic to
+/// `<config>/strata/panic.log` — desktop apps are often started without a
+/// console, so a crash would otherwise leave no trace to debug.
 fn main() {
+    install_panic_log();
     dioxus::LaunchBuilder::desktop().launch(App);
+}
+
+/// Append panic messages to `<config-dir>/strata/panic.log` (in addition to
+/// the default stderr behaviour).
+fn install_panic_log() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default_hook(info);
+        let dir = recent::config_dir().join("strata");
+        if std::fs::create_dir_all(&dir).is_ok() {
+            let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+                (*s).to_string()
+            } else if let Some(s) = info.payload().downcast_ref::<String>() {
+                s.clone()
+            } else {
+                String::from("non-string panic payload")
+            };
+            let location = info
+                .location()
+                .map(|loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()))
+                .unwrap_or_else(|| String::from("unknown location"));
+            let line = format!("[{}] {payload}  @ {location}\n", unix_now());
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("panic.log"))
+                .and_then(|file| {
+                    use std::io::Write;
+                    let mut file = file;
+                    file.write_all(line.as_bytes())
+                });
+        }
+    }));
+}
+
+/// A tiny UTC timestamp (no chrono dependency) for the panic log.
+fn unix_now() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("unix:{now}")
 }
 
 /// Root component: brand header + the pipeline hub + the status bar.
