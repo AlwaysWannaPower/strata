@@ -1,4 +1,4 @@
-{# Base layout: Tailwind (CDN for now) + htmx. Every page/fragment inherits this. #}
+{# Базовый макет: Tailwind (пока через CDN) + htmx. Все страницы и фрагменты наследуют его. #}
 <!DOCTYPE html>
 <html lang="en" class="dark">
 <head>
@@ -6,14 +6,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}Strata{% endblock %} · Strata</title>
 
-    {# Tailwind: CDN keeps the first milestone dependency-free. Production will
-       build a real stylesheet (node stage in Docker / tailwind standalone CLI)
-       and serve it from /static — see docs/guide-web.md. #}
+    {# Tailwind: CDN позволяет пройти первый этап без зависимостей. В продакшене
+       будем собирать настоящую таблицу стилей (node-стадия в Docker / standalone
+       CLI tailwind) и отдавать её из /static — см. docs/guide-web.md. #}
     <script src="https://cdn.tailwindcss.com"></script>
-    {# htmx: the whole client-side story. Forms post, fragments swap. #}
+    {# htmx: вся клиентская часть. Формы отправляются, фрагменты подменяются. #}
     <script src="https://unpkg.com/htmx.org@2.0.4"></script>
     <style>
-        /* Small design tokens shared with the desktop look: dark, monospace data. */
+        /* Мелкие дизайн-токены, общие с десктопным видом: тёмная тема, моноширинные данные. */
         :root { --accent: #4da3ff; }
         body { background: #0e1216; }
         .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
@@ -23,7 +23,7 @@
         .input:focus { outline: none; border-color: var(--accent); }
         .btn { background: #1a2129; border: 1px solid #2a333d; color: #d7dee6; }
         .btn:hover { border-color: var(--accent); }
-        /* htmx shows this class while a request is in flight */
+        /* htmx показывает этот класс, пока запрос в полёте */
         .htmx-request .spinner { visibility: visible; }
         .spinner { visibility: hidden; }
     </style>
@@ -45,8 +45,8 @@
 
 <footer class="max-w-6xl mx-auto px-5 py-6 flex items-center justify-between gap-4 text-xs text-slate-500 mono">
     <span>strata-web · axum + htmx · engine via strata_core::api</span>
-    {# Live resource readout: htmx fetches the fragment on load and every 2s.
-       No JS, no websockets — a plain HTTP poll of a tiny HTML snippet. #}
+    {# Живой вывод ресурсов: htmx запрашивает фрагмент при загрузке и каждые 2 с.
+       Никакого JS, никаких websockets — обычный HTTP-поллинг крошечного HTML-сниппета. #}
     <span id="resources"
           hx-get="/fragments/resources"
           hx-trigger="load, every 2s"

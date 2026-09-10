@@ -1,7 +1,7 @@
-{# Progress fragment for a running staging job.
-   It polls itself: hx-get hits the job endpoint, hx-trigger fires every second,
-   hx-swap="outerHTML" replaces this whole block. When the job finishes the
-   server returns the result fragment (no polling attributes) and the loop ends. #}
+{# Фрагмент прогресса идущей задачи staging.
+   Он поллит сам себя: hx-get бьёт в эндпоинт задачи, hx-trigger срабатывает каждую
+   секунду, hx-swap="outerHTML" заменяет весь этот блок. Когда задача завершается,
+   сервер возвращает фрагмент результата (без атрибутов поллинга), и цикл заканчивается. #}
 <div class="card rounded-lg border-l-4 border-l-[#4da3ff] p-3 space-y-2"
      hx-get="/w/{{ slug }}/jobs/{{ job_id }}"
      hx-trigger="every 1s"

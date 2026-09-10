@@ -2,7 +2,7 @@
 {% block title %}Workspaces{% endblock %}
 
 {% block content %}
-{# Who is signed in (or the call to action), then the workspace list. #}
+{# Кто вошёл (или призыв к действию), затем список воркспейсов. #}
 <section class="card rounded-xl px-4 py-3 flex flex-wrap items-center gap-3">
     {% if let Some(name) = user %}
         <span class="text-sm">Signed in as <span class="mono text-[#4da3ff]">{{ name }}</span></span>
@@ -19,7 +19,7 @@
     {% endif %}
 </section>
 
-{# The home page is the entry to the pipeline: pick or create a workspace. #}
+{# Главная страница — вход в пайплайн: выбрать или создать воркспейс. #}
 <section class="card rounded-xl">
     <div class="card-head px-4 py-2 rounded-t-xl flex items-center gap-3">
         <h1 class="text-sm font-semibold uppercase tracking-wider text-slate-400">Workspaces</h1>
@@ -60,7 +60,7 @@
         <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-400">Allowed source roots</h2>
     </div>
     <div class="p-4 text-xs text-slate-400 space-y-1">
-        {# Security: the service may only read folders listed here. #}
+        {# Безопасность: сервис может читать только папки, перечисленные здесь. #}
         {% for root in source_roots %}
             <div class="mono">{{ root }}</div>
         {% endfor %}

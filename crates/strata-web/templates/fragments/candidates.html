@@ -1,5 +1,6 @@
-{# Fragment: scan candidates (mode B). Each one is a proposal; confirming it
-   creates schemas/<entity>.toml and binds the folder — an explicit user action. #}
+{# Фрагмент: кандидаты сканирования (режим B). Каждый из них — предложение;
+   подтверждение создаёт schemas/<entity>.toml и привязывает папку — это явное
+   действие пользователя. #}
 {% if candidates.is_empty() %}
     <div class="text-sm text-slate-500 italic">
         No candidate folders found. A scan root must contain entity folders as its
@@ -24,8 +25,8 @@
                 {% endif %}
                 <div class="text-[11px] text-slate-500 mono truncate">{{ c.folder.display() }}</div>
             </div>
-            {# Confirm: hidden fields carry entity + folder; the response replaces
-               the #entities block with the updated list. #}
+            {# Подтверждение: скрытые поля несут сущность + папку; ответ заменяет
+               блок #entities обновлённым списком. #}
             <form hx-post="/w/{{ slug }}/entities"
                   hx-target="#entities"
                   hx-swap="innerHTML">

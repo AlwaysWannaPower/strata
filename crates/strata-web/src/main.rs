@@ -1,34 +1,37 @@
-//! # strata-web — the Strata web service (axum + htmx + Tailwind)
+//! # strata-web — веб-сервис Strata (axum + htmx + Tailwind)
 //!
-//! We moved off the Dioxus desktop shell: server-rendered HTML with **htmx**
-//! gives us the same pipeline UI with far less client code, and it runs as a
-//! service (Docker, `docker compose up`) instead of a per-machine app.
+//! Dioxus-десктоп удалён (см. docs/archive), перешли на axum + htmx:
+//! server-rendered HTML с **htmx** даёт тот же UI пайплайна при куда меньшем
+//! объёме клиентского кода и работает как сервис (Docker, `docker compose up`),
+//! а не как приложение на каждой машине.
 //!
-//! ## Layering (the important part)
+//! ## Слои (самое важное здесь)
 //!
 //! ```text
-//!  templates/*.html  ──►  handlers (this file)  ──►  strata_core::api  ──►  engine
+//!  templates/*.html  ──►  обработчики (этот файл)  ──►  strata_core::api  ──►  движок
 //!      ▲                        │
-//!      └──── htmx swaps ◄───────┘  (HTML fragments, no JSON, no client state)
+//!      └──── htmx-подмены ◄─────┘  (HTML-фрагменты, без JSON, без клиентского состояния)
 //! ```
 //!
-//! * Handlers are **thin**: parse a form, call one `strata_core::api` function,
-//!   render a fragment. They never touch Polars, Parquet or `workspace.toml`.
-//! * htmx does the "reactivity": a form posts, the server returns a fragment,
-//!   htmx swaps it into the page. No client-side state machine at all.
-//! * Two hard rules live here as middleware-ish helpers:
-//!   1. **`source_roots` allowlist** — a web user may only point us at folders
-//!      the operator allowed (`STRATA_SOURCE_ROOTS`), never at arbitrary paths
-//!      of the server (that would be a file-disclosure hole).
-//!   2. **workspace resolution** — every workspace route resolves a slug under
-//!      `STRATA_WORKSPACE_ROOT`, again with the "must stay inside" check.
+//! * Обработчики **тонкие**: разобрать форму, вызвать одну функцию
+//!   `strata_core::api`, отрендерить фрагмент. Они никогда не трогают Polars,
+//!   Parquet или `workspace.toml`.
+//! * «Реактивность» делает htmx: форма отправляется, сервер возвращает фрагмент,
+//!   htmx подменяет его на странице. Никакого клиентского автомата состояний.
+//! * Два жёстких правила живут прямо здесь, в виде middleware-хелперов:
+//!   1. **allowlist `source_roots`** — веб-пользователь может указать только те
+//!      папки, что разрешил оператор (`STRATA_SOURCE_ROOTS`), и никогда —
+//!      произвольные пути сервера (это была бы дыра на раскрытие файлов).
+//!   2. **разрешение воркспейса** — каждый маршрут воркспейса разрешает slug
+//!      внутри `STRATA_WORKSPACE_ROOT`, снова с проверкой «должно остаться внутри».
 //!
-//! ## Why htmx instead of Dioxus (short version)
+//! ## Почему htmx, а не Dioxus (короткая версия)
 //!
-//! Long staging runs, tables, forms and status panels are server-side data with
-//! small UI deltas — exactly htmx's sweet spot. The one thing htmx does *not*
-//! give us is a virtualized million-row grid; that is a later, opt-in island of
-//! JavaScript (AG Grid/ TanStack) talking to a paginated endpoint.
+//! Долгие запуски staging, таблицы, формы и панели статуса — это серверные
+//! данные с небольшими дельтами UI, то есть ровно то, для чего хорош htmx.
+//! Единственное, чего htmx *не* даёт — виртуализированную таблицу на миллион
+//! строк; это более поздний опциональный островок JavaScript (AG Grid/TanStack),
+//! общающийся с постраничным эндпоинтом.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -54,42 +57,44 @@ use tower_sessions::{MemoryStore, Session, SessionManagerLayer};
 use strata_core::api;
 
 // ---------------------------------------------------------------------------
-// Application state
+// Состояние приложения
 // ---------------------------------------------------------------------------
 
-/// Shared, immutable service state. `Arc` so handlers can clone it cheaply;
-/// everything in it is read-only, which keeps the web layer free of locks.
+/// Общее неизменяемое состояние сервиса. `Arc`, чтобы обработчики дёшево его
+/// клонировали; всё внутри — только для чтения, поэтому веб-слой обходится без
+/// блокировок.
 #[derive(Clone)]
 struct AppState {
-    /// Where workspaces live (`workspace.toml`, `schemas/`, `data/` per slug).
+    /// Где живут воркспейсы (`workspace.toml`, `schemas/`, `data/` на каждый slug).
     workspace_root: PathBuf,
-    /// Folders the service is allowed to read data from (allowlist).
+    /// Папки, из которых сервису разрешено читать данные (allowlist).
     source_roots: Vec<PathBuf>,
-    /// Users database (SQLite; see `auth.rs`).
+    /// База пользователей (SQLite; см. `auth.rs`).
     db: SqlitePool,
-    /// Process start time, for the "uptime" chip.
+    /// Время старта процесса — для чипа «uptime».
     started: Instant,
-    /// Background staging jobs: id → (entity, state). Entries are removed as
-    /// soon as the job finishes and its final fragment has been served, so the
-    /// map stays tiny (a handful of in-flight runs).
+    /// Фоновые задачи staging: id → (сущность, состояние). Записи удаляются
+    /// сразу после того, как задача завершится и её финальный фрагмент будет
+    /// отдан, поэтому карта остаётся крошечной (несколько запусков в полёте).
     jobs: Arc<Mutex<HashMap<String, Arc<Mutex<JobEntry>>>>>,
-    /// Monotonic job id source (`j1`, `j2`, …).
+    /// Монотонный источник id задач (`j1`, `j2`, …).
     job_seq: Arc<AtomicU64>,
-    /// Shared resource sampler (`sysinfo`). Kept in a `Mutex` because CPU%
-    /// needs two refreshes separated by time, so the instance must persist
-    /// between requests. This is the only lock in the service and it is held
-    /// for microseconds (no I/O inside).
+    /// Общий сэмплер ресурсов (`sysinfo`). Держим в `Mutex`, потому что CPU%
+    /// требует двух обновлений, разделённых во времени, поэтому экземпляр должен
+    /// переживать запросы. Это единственная блокировка в сервисе, и держится она
+    /// микросекунды (никакого I/O внутри).
     system: Arc<Mutex<System>>,
 }
 
 impl AppState {
-    /// Build state from environment variables.
+    /// Собрать состояние из переменных окружения.
     ///
-    /// * `STRATA_WORKSPACE_ROOT` — workspace storage (default `./workspaces`);
-    ///   each user gets `workspaces/<user_id>/`.
-    /// * `STRATA_SOURCE_ROOTS` — `:`-separated allowlist (default: workspace root)
-    /// * `STRATA_ADDR` — listen address (default `0.0.0.0:8080`)
-    /// * `STRATA_DB_URL` — SQLite URL (default `sqlite://<root>/strata.db?mode=rwc`)
+    /// * `STRATA_WORKSPACE_ROOT` — хранилище воркспейсов (по умолчанию
+    ///   `./workspaces`); каждый пользователь получает `workspaces/<user_id>/`.
+    /// * `STRATA_SOURCE_ROOTS` — разделённый `:` allowlist (по умолчанию: корень
+    ///   воркспейсов)
+    /// * `STRATA_ADDR` — адрес прослушивания (по умолчанию `0.0.0.0:8080`)
+    /// * `STRATA_DB_URL` — URL SQLite (по умолчанию `sqlite://<root>/strata.db?mode=rwc`)
     async fn from_env() -> Result<(Self, SocketAddr), Box<dyn std::error::Error>> {
         let workspace_root = std::env::var("STRATA_WORKSPACE_ROOT")
             .map(PathBuf::from)
@@ -102,7 +107,7 @@ impl AppState {
             .parse()
             .unwrap_or_else(|_| "0.0.0.0:8080".parse().expect("valid fallback addr"));
 
-        // `mode=rwc` = create the file if missing (sqlx default is read-only).
+        // `mode=rwc` = создать файл, если его нет (по умолчанию sqlx — read-only).
         let db_url = std::env::var("STRATA_DB_URL").unwrap_or_else(|_| {
             format!("sqlite://{}/strata.db?mode=rwc", workspace_root.display())
         });
@@ -124,18 +129,19 @@ impl AppState {
         ))
     }
 
-    /// Workspace root **of one user**: each account owns `workspaces/<user_id>/`.
+    /// Корень воркспейсов **одного пользователя**: каждая учётная запись владеет
+    /// `workspaces/<user_id>/`.
     ///
-    /// Multi-tenancy here is deliberately blunt — a separate directory per user
-    /// id — because the engine works with paths, and a path jail is the thing
-    /// that actually keeps tenants apart.
+    /// Мультитенантность здесь намеренно грубая — отдельный каталог на id
+    /// пользователя — потому что движок работает с путями, а именно «тюрьма»
+    /// для путей и разводит тенантов по-настоящему.
     fn user_root(&self, user_id: i64) -> PathBuf {
         self.workspace_root.join(user_id.to_string())
     }
 
-    /// Resolve a workspace slug to its directory, refusing path escapes.
+    /// Разрешить slug воркспейса в его каталог, отказывая в побеге из пути.
     fn workspace_dir(&self, user_id: i64, slug: &str) -> Result<PathBuf, WebError> {
-        // Slugs come from the URL; validate before touching the file system.
+        // Slug приходит из URL; проверяем его до обращения к файловой системе.
         let ok = !slug.is_empty()
             && slug.len() <= 64
             && slug
@@ -149,11 +155,11 @@ impl AppState {
 }
 
 // ---------------------------------------------------------------------------
-// Error handling: one small type → HTTP status + human message
+// Обработка ошибок: один маленький тип → HTTP-статус + понятное сообщение
 // ---------------------------------------------------------------------------
 
-/// A web-layer error. Engine errors arrive as [`api::ApiError`] and become a
-/// 400 with a readable message (they are user-caused: bad folder, bad schema).
+/// Ошибка веб-слоя. Ошибки движка приходят как [`api::ApiError`] и становятся
+/// 400 с читаемым сообщением (их причина — пользователь: плохая папка, плохая схема).
 #[derive(Debug)]
 struct WebError {
     status: StatusCode,
@@ -185,8 +191,8 @@ impl WebError {
 
 impl From<auth::AuthError> for WebError {
     fn from(error: auth::AuthError) -> Self {
-        // Database/validation problems are user-facing here (bad input, taken
-        // username); real outages surface as 500 in the logs.
+        // Проблемы БД/валидации здесь видны пользователю (плохой ввод, занятое
+        // имя); настоящие сбои всплывают как 500 в логах.
         WebError::bad_request(error.0)
     }
 }
@@ -199,8 +205,8 @@ impl From<api::ApiError> for WebError {
 
 impl IntoResponse for WebError {
     fn into_response(self) -> Response {
-        // Plain text is enough: htmx shows it inside the swapped fragment
-        // target, and `curl` users get a readable reason.
+        // Обычного текста достаточно: htmx покажет его внутри подменяемого
+        // фрагмента, а пользователи `curl` получат читаемую причину.
         (self.status, self.message).into_response()
     }
 }
@@ -208,30 +214,30 @@ impl IntoResponse for WebError {
 type WebResult<T> = Result<T, WebError>;
 
 // ---------------------------------------------------------------------------
-// Background jobs: staging runs out-of-band, the browser polls a fragment
+// Фоновые задачи: staging идёт вне запроса, браузер поллит фрагмент
 // ---------------------------------------------------------------------------
 
-/// Which entity a job belongs to (needed to render its final fragment).
+/// К какой сущности относится задача (нужно, чтобы отрендерить её финальный фрагмент).
 #[derive(Debug)]
 struct JobEntry {
     entity: String,
     state: JobState,
 }
 
-/// Lifecycle of one staging run.
+/// Жизненный цикл одного запуска staging.
 #[derive(Debug)]
 enum JobState {
-    /// Work in progress: `total == 0` means "not counted yet".
+    /// Работа идёт: `total == 0` означает «ещё не посчитано».
     Running { done: usize, total: usize },
-    /// Finished successfully; the outcome carries the report.
+    /// Завершилась успешно; результат несёт отчёт.
     Done(Box<api::StageOutcome>),
-    /// Finished with an engine/user error.
+    /// Завершилась ошибкой движка/пользователя.
     Failed(String),
 }
 
-/// Fragment: progress of a running job. It **polls itself** (`hx-get` pointing
-/// at the job endpoint, `hx-trigger="every 1s"`, `hx-swap="outerHTML"`), so the
-/// page keeps updating without a single line of JavaScript.
+/// Фрагмент: прогресс идущей задачи. Он **сам себя поллит** (`hx-get` на
+/// эндпоинт задачи, `hx-trigger="every 1s"`, `hx-swap="outerHTML"`), поэтому
+/// страница продолжает обновляться без единой строки JavaScript.
 #[derive(Template)]
 #[template(path = "fragments/job_running.html")]
 struct JobRunningFragment {
@@ -243,9 +249,9 @@ struct JobRunningFragment {
     percent: usize,
 }
 
-/// Ensure `candidate` is inside one of the allowed roots (after symlink-free
-/// canonicalization). This is the single guard against "read any file on the
-/// server" requests.
+/// Убедиться, что `candidate` лежит внутри одного из разрешённых корней (после
+/// канонизации, без симлинков). Это единственная защита от запросов в духе
+/// «прочитай любой файл на сервере».
 fn ensure_allowed(state: &AppState, candidate: &Path) -> WebResult<PathBuf> {
     let canonical = candidate
         .canonicalize()
@@ -264,10 +270,10 @@ fn ensure_allowed(state: &AppState, candidate: &Path) -> WebResult<PathBuf> {
     )))
 }
 
-/// Resolve a workspace slug to an existing workspace directory.
+/// Разрешить slug воркспейса в существующий каталог воркспейса.
 ///
-/// Missing workspace → 404 (a route-level concern), while *invalid* slugs are
-/// rejected earlier by [`AppState::workspace_dir`].
+/// Отсутствующий воркспейс → 404 (забота уровня маршрутов), а *некорректные*
+/// slug отбрасываются раньше, в [`AppState::workspace_dir`].
 fn require_workspace(state: &AppState, user_id: i64, slug: &str) -> WebResult<PathBuf> {
     let dir = state.workspace_dir(user_id, slug)?;
     if !dir.join("workspace.toml").exists() {
@@ -278,28 +284,28 @@ fn require_workspace(state: &AppState, user_id: i64, slug: &str) -> WebResult<Pa
 }
 
 // ---------------------------------------------------------------------------
-// Templates (askama compiles these into the binary — no runtime files needed)
+// Шаблоны (askama компилирует их в бинарник — файлы в рантайме не нужны)
 // ---------------------------------------------------------------------------
 
-/// One row of the workspace list (pre-formatted strings keep the template dumb).
+/// Одна строка списка воркспейсов (строки предформатированы, чтобы шаблон оставался простым).
 struct WsRow {
     slug: String,
     name: String,
     data_dir: String,
 }
 
-/// Index page: workspace list + create form.
+/// Главная страница: список воркспейсов + форма создания.
 #[derive(Template)]
 #[template(path = "index.html")]
 struct IndexTemplate {
-    /// `Some(username)` when signed in; `None` shows the sign-in call to action.
+    /// `Some(username)` когда пользователь вошёл; `None` показывает призыв войти.
     user: Option<String>,
     workspaces: Vec<WsRow>,
     workspace_root: String,
     source_roots: Vec<String>,
 }
 
-/// Workspace "pipeline hub": entities, scan form, stage buttons.
+/// «Хаб пайплайна» воркспейса: сущности, форма сканирования, кнопки запуска staging.
 #[derive(Template)]
 #[template(path = "hub.html")]
 struct HubTemplate {
@@ -310,7 +316,7 @@ struct HubTemplate {
     uptime_secs: u64,
 }
 
-/// Fragment: entity cards (also returned after confirm/stage actions).
+/// Фрагмент: карточки сущностей (также возвращается после подтверждения/запуска).
 #[derive(Template)]
 #[template(path = "fragments/entities.html")]
 struct EntitiesFragment {
@@ -318,7 +324,7 @@ struct EntitiesFragment {
     entities: Vec<api::EntityInfo>,
 }
 
-/// Fragment: scan candidates with "confirm & bind" forms.
+/// Фрагмент: кандидаты сканирования с формами «подтвердить и привязать».
 #[derive(Template)]
 #[template(path = "fragments/candidates.html")]
 struct CandidatesFragment {
@@ -326,21 +332,21 @@ struct CandidatesFragment {
     candidates: Vec<api::CandidateInfo>,
 }
 
-/// Login page.
+/// Страница входа.
 #[derive(Template)]
 #[template(path = "login.html")]
 struct LoginTemplate {
     error: Option<String>,
 }
 
-/// Registration page.
+/// Страница регистрации.
 #[derive(Template)]
 #[template(path = "register.html")]
 struct RegisterTemplate {
     error: Option<String>,
 }
 
-/// Fragment: result of a staging run.
+/// Фрагмент: результат запуска staging.
 #[derive(Template)]
 #[template(path = "fragments/stage.html")]
 struct StageFragment {
@@ -348,7 +354,7 @@ struct StageFragment {
     outcome: api::StageOutcome,
 }
 
-/// Fragment: a red error box (used by every htmx action on failure).
+/// Фрагмент: красный блок ошибки (используется всеми htmx-действиями при сбое).
 #[derive(Template)]
 #[template(path = "fragments/error.html")]
 struct ErrorFragment {
@@ -356,7 +362,7 @@ struct ErrorFragment {
 }
 
 // ---------------------------------------------------------------------------
-// Form payloads (axum's Form extractor + serde)
+// Полезные нагрузки форм (extractor `Form` из axum + serde)
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -382,10 +388,10 @@ struct EntityForm {
 }
 
 // ---------------------------------------------------------------------------
-// Handlers
+// Обработчики
 // ---------------------------------------------------------------------------
 
-/// `GET /` — the workspace list.
+/// `GET /` — список воркспейсов.
 async fn index(State(state): State<AppState>, session: Session) -> WebResult<Html<String>> {
     let user = auth::current_user(&state.db, &session).await;
     let root = match &user {
@@ -417,7 +423,7 @@ async fn index(State(state): State<AppState>, session: Session) -> WebResult<Htm
     Ok(Html(page.render().map_err(render_error)?))
 }
 
-/// `POST /workspaces` — create a workspace, then redirect to its hub.
+/// `POST /workspaces` — создать воркспейс, затем перенаправить в его хаб.
 async fn create_workspace(
     State(state): State<AppState>,
     session: Session,
@@ -435,7 +441,7 @@ async fn create_workspace(
     Ok(Redirect::to(&format!("/w/{slug}")))
 }
 
-/// `GET /w/{slug}` — the pipeline hub of one workspace.
+/// `GET /w/{slug}` — хаб пайплайна одного воркспейса.
 async fn hub(
     State(state): State<AppState>,
     session: Session,
@@ -454,17 +460,17 @@ async fn hub(
     Ok(Html(page.render().map_err(render_error)?))
 }
 
-/// `POST /w/{slug}/scan` — inspect a root's direct subfolders (mode B).
+/// `POST /w/{slug}/scan` — посмотреть прямые подпапки корня (режим B).
 ///
-/// Returns the *candidates fragment*; nothing is written to the workspace
-/// (proposal stage — the user still has to confirm each entity).
+/// Возвращает *фрагмент кандидатов*; в воркспейс ничего не пишется (стадия
+/// предложения — пользователь всё ещё должен подтвердить каждую сущность).
 async fn scan_root(
     State(state): State<AppState>,
     session: Session,
     AxumPath(slug): AxumPath<String>,
     Form(form): Form<ScanForm>,
 ) -> WebResult<Html<String>> {
-    // The workspace must exist; the scan itself only needs the root path.
+    // Воркспейс должен существовать; самому сканированию нужен только путь корня.
     let user_id = signed_in(&session).await?;
     let _dir = require_workspace(&state, user_id, &slug)?;
     let root = ensure_allowed(&state, Path::new(form.root.trim()))?;
@@ -473,7 +479,7 @@ async fn scan_root(
     Ok(Html(fragment.render().map_err(render_error)?))
 }
 
-/// `POST /w/{slug}/entities` — confirm a candidate: schema + binding.
+/// `POST /w/{slug}/entities` — подтвердить кандидата: схема + привязка.
 async fn add_entity(
     State(state): State<AppState>,
     session: Session,
@@ -484,8 +490,8 @@ async fn add_entity(
     let dir = require_workspace(&state, user_id, &slug)?;
     let folder = ensure_allowed(&state, Path::new(form.folder.trim()))?;
 
-    // Any engine refusal (empty folder, unreadable files) is surfaced to the
-    // user as an htmx-swappable error fragment instead of a bare 400 page.
+    // Любой отказ движка (пустая папка, нечитаемые файлы) показывается
+    // пользователю как htmx-фрагмент ошибки вместо голой страницы 400.
     if let Err(error) = api::confirm_entity(&dir, &form.entity, &folder) {
         return Ok(Html(
             ErrorFragment {
@@ -502,12 +508,13 @@ async fn add_entity(
     Ok(Html(fragment.render().map_err(render_error)?))
 }
 
-/// `POST /w/{slug}/entities/{entity}/stage` — start staging in the background.
+/// `POST /w/{slug}/entities/{entity}/stage` — запустить staging в фоне.
 ///
-/// Staging is CPU- and IO-bound (Parquet writing, type checks), so it must not
-/// block the request thread: we spawn it on a blocking task and immediately
-/// return a *progress fragment* that polls the job endpoint. The browser sees
-/// the bar move; the server stays responsive for other users.
+/// Staging упирается в CPU и IO (запись Parquet, проверки типов), поэтому он не
+/// должен блокировать поток запроса: мы запускаем его блокирующей задачей и
+/// сразу возвращаем *фрагмент прогресса*, который поллит эндпоинт задачи.
+/// Браузер видит, как движется полоса; сервер остаётся отзывчивым для других
+/// пользователей.
 async fn stage_entity(
     State(state): State<AppState>,
     session: Session,
@@ -527,8 +534,8 @@ async fn stage_entity(
         .map_err(|_| WebError::internal("job registry poisoned"))?
         .insert(job_id.clone(), entry.clone());
 
-    // The engine call runs on a blocking thread; progress is pushed into the
-    // shared job state, which the polling endpoint reads.
+    // Вызов движка выполняется в блокирующем потоке; прогресс кладётся в общее
+    // состояние задачи, откуда его читает эндпоинт поллинга.
     let task_entry = entry.clone();
     let task_dir = dir.clone();
     let task_entity = entity.clone();
@@ -557,12 +564,12 @@ async fn stage_entity(
     Ok(Html(fragment.render().map_err(render_error)?))
 }
 
-/// `GET /w/{slug}/jobs/{job_id}` — progress (running) or the final result.
+/// `GET /w/{slug}/jobs/{job_id}` — прогресс (пока задача идёт) или финальный результат.
 ///
-/// htmx swaps this fragment into `#stage`. Running fragments keep polling;
-/// final fragments carry no polling attributes, so the loop stops by itself.
-/// Finished jobs are removed from the registry right after their result is
-/// served.
+/// htmx подменяет этот фрагмент в `#stage`. Идущие фрагменты продолжают
+/// поллинг; финальные фрагменты не несут атрибутов поллинга, поэтому цикл
+/// останавливается сам. Завершённые задачи удаляются из реестра сразу после
+/// того, как их результат отдан.
 async fn job_status(
     State(state): State<AppState>,
     session: Session,
@@ -582,8 +589,8 @@ async fn job_status(
         return Err(WebError::not_found(format!("job '{job_id}' not found")));
     };
 
-    // Snapshot under the lock, then render outside it (never render holding a
-    // lock: a template error must not poison shared state).
+    // Снимок берём под блокировкой, а рендерим уже вне неё (никогда не рендерим
+    // с блокировкой в руках: ошибка шаблона не должна отравить общее состояние).
     enum Snapshot {
         Running { done: usize, total: usize },
         Final(JobState),
@@ -598,8 +605,8 @@ async fn job_status(
                 done: *done,
                 total: *total,
             },
-            // Final states are consumed exactly once: the polling loop ends
-            // with this response, so there is nothing left to read afterwards.
+            // Финальные состояния потребляются ровно один раз: цикл поллинга
+            // заканчивается этим ответом, так что читать дальше уже нечего.
             JobState::Done(_) | JobState::Failed(_) => {
                 let taken = std::mem::replace(
                     &mut guard.state,
@@ -642,7 +649,7 @@ async fn job_status(
         Snapshot::Final(JobState::Running { .. }) => unreachable!("running is not final"),
     };
 
-    // Finished → drop the job from the registry (browser stops polling).
+    // Завершено → убираем задачу из реестра (браузер прекращает поллинг).
     if is_final {
         if let Ok(mut jobs) = state.jobs.lock() {
             jobs.remove(&job_id);
@@ -653,20 +660,21 @@ async fn job_status(
 }
 
 // ---------------------------------------------------------------------------
-// Authentication: pages, submit handlers, route guard middleware
+// Аутентификация: страницы, обработчики отправки, middleware-охранник маршрутов
 // ---------------------------------------------------------------------------
 
-/// User id from the session, or a 400 if the session somehow lost it.
+/// id пользователя из сессии, или 400, если сессия его почему-то потеряла.
 async fn signed_in(session: &Session) -> WebResult<i64> {
     auth::current_user_id(session)
         .await
         .ok_or_else(|| WebError::bad_request("not signed in"))
 }
 
-/// Middleware guarding workspace routes: anonymous → redirect to the login page.
+/// Middleware, охраняющая маршруты воркспейсов: аноним → редирект на страницу входа.
 ///
-/// Being a middleware (not a check inside every handler) keeps the rule in one
-/// place: any new route added under the protected router is covered by default.
+/// То, что это middleware (а не проверка внутри каждого обработчика), держит
+/// правило в одном месте: любой новый маршрут, добавленный под защищённый
+/// роутер, покрыт по умолчанию.
 async fn require_login(
     State(state): State<AppState>,
     session: Session,
@@ -685,10 +693,10 @@ async fn login_page() -> WebResult<Html<String>> {
     Ok(Html(page.render().map_err(render_error)?))
 }
 
-/// `POST /login` — verify credentials, start a session.
+/// `POST /login` — проверить учётные данные, начать сессию.
 ///
-/// Argon2 verification costs tens of milliseconds of CPU, so it runs on a
-/// blocking thread; otherwise a burst of logins would stall the async runtime.
+/// Проверка Argon2 стоит десятки миллисекунд CPU, поэтому выполняется в
+/// блокирующем потоке; иначе всплеск входов застопорит async-рантайм.
 async fn login_submit(
     State(state): State<AppState>,
     session: Session,
@@ -699,7 +707,7 @@ async fn login_submit(
 
     let user = auth::find_user(&state.db, &username).await?;
     let Some((id, _, phc)) = user else {
-        // Same message for "no such user" and "wrong password".
+        // Одно и то же сообщение для «нет такого пользователя» и «неверный пароль».
         return Ok(login_failed("invalid username or password"));
     };
 
@@ -716,7 +724,7 @@ async fn login_submit(
     Ok(Redirect::to("/").into_response())
 }
 
-/// Render the login page with an error (200 so the browser keeps the form).
+/// Отрендерить страницу входа с ошибкой (200, чтобы браузер сохранил форму).
 fn login_failed(message: &str) -> Response {
     let page = LoginTemplate {
         error: Some(message.to_string()),
@@ -733,7 +741,7 @@ async fn register_page() -> WebResult<Html<String>> {
     Ok(Html(page.render().map_err(render_error)?))
 }
 
-/// `POST /register` — create the account and sign the user in.
+/// `POST /register` — создать учётную запись и войти под ней.
 async fn register_submit(
     State(state): State<AppState>,
     session: Session,
@@ -746,7 +754,7 @@ async fn register_submit(
         return Ok(register_failed(&error.0));
     }
 
-    // Hashing is intentionally expensive (Argon2id) → blocking thread.
+    // Хэширование намеренно дорогое (Argon2id) → блокирующий поток.
     let hash = tokio::task::spawn_blocking(move || auth::hash_password(&password))
         .await
         .map_err(|_| WebError::internal("password hashing panicked"))?
@@ -757,7 +765,7 @@ async fn register_submit(
             auth::login(&session, id)
                 .await
                 .map_err(|e| WebError::internal(e.0))?;
-            // Give the new user their own workspace root immediately.
+            // Сразу выдаём новому пользователю его собственный корень воркспейсов.
             let _ = std::fs::create_dir_all(state.user_root(id));
             Ok(Redirect::to("/").into_response())
         }
@@ -765,7 +773,7 @@ async fn register_submit(
     }
 }
 
-/// Render the registration page with an error.
+/// Отрендерить страницу регистрации с ошибкой.
 fn register_failed(message: &str) -> Response {
     let page = RegisterTemplate {
         error: Some(message.to_string()),
@@ -776,33 +784,34 @@ fn register_failed(message: &str) -> Response {
     }
 }
 
-/// `POST /logout` — destroy the server-side session.
+/// `POST /logout` — уничтожить серверную сессию.
 async fn logout_submit(session: Session) -> Redirect {
     auth::logout(&session).await;
     Redirect::to("/login")
 }
 
 // ---------------------------------------------------------------------------
-// Resource metrics: "how much is the service eating?"
+// Метрики ресурсов: «сколько сервис кушает?»
 // ---------------------------------------------------------------------------
 
-/// One resource snapshot for the status widget and `/metrics`.
+/// Один снимок ресурсов для виджета статуса и `/metrics`.
 #[derive(Clone, Copy)]
 struct ResourceSample {
-    /// Resident set size of this process (bytes) — the "RAM the app uses".
+    /// Resident set size этого процесса (байты) — «сколько RAM ест приложение».
     rss_bytes: Option<u64>,
-    /// Process CPU usage in percent. The first sample after start is 0.0:
-    /// `sysinfo` needs two refreshes separated by time to compute a delta.
+    /// Использование CPU процессом в процентах. Первый снимок после старта —
+    /// 0.0: `sysinfo` нужны два обновления, разделённых во времени, чтобы
+    /// посчитать дельту.
     cpu_pct: Option<f32>,
-    /// Total physical memory of the host (bytes).
+    /// Всего физической памяти на хосте (байты).
     mem_total_bytes: u64,
-    /// Used physical memory of the host (bytes).
+    /// Использовано физической памяти на хосте (байты).
     mem_used_bytes: u64,
-    /// Workspaces currently present.
+    /// Воркспейсов сейчас существует.
     workspaces: usize,
 }
 
-/// Take a fresh sample. Cheap: one process refresh + one memory refresh.
+/// Снять свежий снимок. Дёшево: одно обновление процессов + одно обновление памяти.
 fn sample_resources(state: &AppState) -> ResourceSample {
     let pid = Pid::from_u32(std::process::id());
     let workspaces = api::list_workspaces(&state.workspace_root)
@@ -811,8 +820,8 @@ fn sample_resources(state: &AppState) -> ResourceSample {
 
     let mut system = match state.system.lock() {
         Ok(guard) => guard,
-        // A poisoned mutex must not take the whole service down: report
-        // "unknown" metrics instead.
+        // Отравленный мьютекс не должен ронять весь сервис: вместо этого
+        // сообщаем метрики «неизвестно».
         Err(_) => {
             return ResourceSample {
                 rss_bytes: None,
@@ -837,7 +846,7 @@ fn sample_resources(state: &AppState) -> ResourceSample {
     }
 }
 
-/// Human byte formatting for the widget (`123 MB`, `1.4 GB`).
+/// Человеческое форматирование байтов для виджета (`123 MB`, `1.4 GB`).
 fn human_bytes(bytes: u64) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * 1024.0;
@@ -854,7 +863,7 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
-/// Fragment: the little live resource readout (htmx polls it every 2s).
+/// Фрагмент: маленький живой вывод ресурсов (htmx поллит его каждые 2 с).
 #[derive(Template)]
 #[template(path = "fragments/resources.html")]
 struct ResourcesFragment {
@@ -889,8 +898,8 @@ async fn resources_fragment(State(state): State<AppState>) -> WebResult<Html<Str
     Ok(Html(fragment.render().map_err(render_error)?))
 }
 
-/// `GET /metrics` — plain-text metrics for Prometheus-style scrapers
-/// (and for `curl`, which is how you debug it).
+/// `GET /metrics` — текстовые метрики для скрейперов в стиле Prometheus
+/// (и для `curl`, которым это и отлаживают).
 async fn metrics(State(state): State<AppState>) -> String {
     let sample = sample_resources(&state);
     let mut out = String::new();
@@ -922,7 +931,7 @@ async fn metrics(State(state): State<AppState>) -> String {
     out
 }
 
-/// `GET /healthz` — container healthcheck (also handy in `curl`).
+/// `GET /healthz` — healthcheck контейнера (тоже удобно через `curl`).
 async fn healthz(State(state): State<AppState>) -> String {
     format!(
         "ok uptime={}s workspaces={}",
@@ -931,7 +940,7 @@ async fn healthz(State(state): State<AppState>) -> String {
     )
 }
 
-/// Map an askama render failure into a 500.
+/// Превратить сбой рендера askama в 500.
 fn render_error(error: askama::Error) -> WebError {
     WebError::internal(format!("template error: {error}"))
 }
@@ -957,8 +966,8 @@ async fn main() {
         }
     };
 
-    // Routes that require a signed-in user. Everything workspace-related lives
-    // here, guarded by one middleware (`require_login`).
+    // Маршруты, требующие вошедшего пользователя. Всё, что связано с
+    // воркспейсами, живёт здесь, под охраной одной middleware (`require_login`).
     let protected = Router::new()
         .route("/workspaces", post(create_workspace))
         .route("/w/{slug}", get(hub))
@@ -978,10 +987,10 @@ async fn main() {
         .route("/logout", post(logout_submit))
         .merge(protected)
         .with_state(state.clone())
-        // Session middleware must wrap everything (including the route-layer
-        // guard above), so it is applied last = outermost.
-        // `with_secure(false)` allows plain HTTP in local/dev; put the service
-        // behind TLS and flip it on in production.
+        // Middleware сессий должна обёртывать всё (включая guard уровня маршрутов
+        // выше), поэтому применяется последней = самой внешней.
+        // `with_secure(false)` разрешает обычный HTTP локально и в dev; поставьте
+        // сервис за TLS и включите её в продакшене.
         .layer(SessionManagerLayer::new(MemoryStore::default()).with_secure(false));
 
     tracing::info!(
@@ -998,7 +1007,7 @@ async fn main() {
         }
     };
 
-    // Graceful shutdown keeps `docker compose down` clean.
+    // Аккуратное завершение, чтобы `docker compose down` проходил чисто.
     if let Err(error) = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
@@ -1007,7 +1016,7 @@ async fn main() {
     }
 }
 
-/// Wait for Ctrl-C / SIGTERM.
+/// Дождаться Ctrl-C / SIGTERM.
 async fn shutdown_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
@@ -1030,8 +1039,8 @@ async fn shutdown_signal() {
     }
 }
 
-/// Unused import guard for `Arc` (kept for the future shared-state extension:
-/// background job registry). Referencing it in a doc-test-free way keeps the
-/// dependency explicit without dead-code warnings.
+/// Заглушка для неиспользуемого импорта `Arc` (сохранена ради будущего
+/// расширения общего состояния: реестр фоновых задач). Ссылка на него без
+/// doc-теста оставляет зависимость явной и без предупреждений о мёртвом коде.
 #[allow(dead_code)]
 type SharedState = Arc<AppState>;

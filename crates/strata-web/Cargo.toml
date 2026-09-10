@@ -5,7 +5,7 @@ edition.workspace = true
 description = "Strata web service (axum + htmx + Tailwind): server-rendered staging pipeline over strata-core's application API."
 
 [dependencies]
-# The engine is reached ONLY through `strata_core::api` — see src/main.rs docs.
+# Движок доступен ТОЛЬКО через `strata_core::api` — см. доки в src/main.rs.
 strata-core = { path = "../strata-core" }
 
 axum = "0.8"
@@ -15,11 +15,11 @@ serde = { version = "1", features = ["derive"] }
 sysinfo = "0.39"
 tracing = "0.1"
 
-# --- auth & storage (platform slice) -------------------------------------
-# Sessions as a tower/axum middleware (cookie-based, server-side store).
+# --- аутентификация и хранилище (срез платформы) --------------------------
+# Сессии как middleware для tower/axum (на cookie, хранилище на сервере).
 tower-sessions = "0.15"
-# SQLite for users; swap to Postgres by changing the URL + feature.
+# SQLite для пользователей; переезд на Postgres — смена URL + feature.
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "sqlite", "macros", "migrate"] }
-# Argon2id password hashing (RustCrypto) — the recommended default.
+# Хэширование паролей Argon2id (RustCrypto) — рекомендуемый выбор по умолчанию.
 argon2 = "0.6"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

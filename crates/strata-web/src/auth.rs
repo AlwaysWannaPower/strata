@@ -1,4 +1,4 @@
-//! # Authentication & users (platform slice)
+//! # Аутентификация и пользователи (срез платформы)
 //!
 //! ## Почему такие библиотеки
 //!
@@ -197,7 +197,7 @@ mod tests {
         assert!(phc.starts_with("$argon2"), "PHC string expected, got {phc}");
         assert!(verify_password("correct horse battery", &phc));
         assert!(!verify_password("wrong password", &phc));
-        // Same password, different salt → different hash.
+        // Один и тот же пароль, разная соль → разный хэш.
         let other = hash_password("correct horse battery").expect("hash");
         assert_ne!(phc, other);
     }

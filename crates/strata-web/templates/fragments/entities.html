@@ -1,4 +1,4 @@
-{# Fragment: entity cards. Returned by the hub page and after confirm/stage. #}
+{# Фрагмент: карточки сущностей. Возвращается страницей хаба и после подтверждения/запуска. #}
 {% if entities.is_empty() %}
     <p class="text-sm text-slate-500 italic">No entities confirmed yet — scan a root and confirm a candidate.</p>
 {% else %}
@@ -14,8 +14,8 @@
                 {% endif %}
                 <div class="text-[11px] text-slate-500 mono truncate">{{ e.folder.display() }}</div>
             </div>
-            {# Stage: server-side run of schema-validated staging; the fragment
-               lands in #stage, leaving the entity list untouched. #}
+            {# Stage: серверный запуск staging с проверкой по схеме; фрагмент
+               попадает в #stage и не трогает список сущностей. #}
             <button class="btn rounded-md px-3 py-1.5 text-xs whitespace-nowrap"
                     hx-post="/w/{{ slug }}/entities/{{ e.entity }}/stage"
                     hx-target="#stage"

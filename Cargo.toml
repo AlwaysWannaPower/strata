@@ -1,13 +1,16 @@
 # Workspace manifest for the `strata` Data Engineering Workbench.
 #
-# Members:
-#   crates/strata-core — library: all Polars/Parquet data logic (no UI).
-#   crates/strata-app  — binary: the Dioxus desktop application (UI only).
+# Участники workspace:
+#   crates/strata-core — библиотека: вся логика данных (Polars/Parquet), без UI.
+#   crates/strata-web  — сервис: axum + htmx, вызывает только strata_core::api.
+#
+# Dioxus-десктоп (crates/strata-app) удалён: его последняя версия — коммит
+# 0838e06; учебные заметки по нему лежат в docs/archive/.
 #
 # Edition "2024" and version are shared via [workspace.package].
 [workspace]
 resolver = "3"
-members = ["crates/strata-core", "crates/strata-app", "crates/strata-web"]
+members = ["crates/strata-core", "crates/strata-web"]
 
 [workspace.package]
 version = "0.1.0"
