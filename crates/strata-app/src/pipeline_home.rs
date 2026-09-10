@@ -299,42 +299,22 @@ pub fn PipelineHome(props: PipelineHomeProps) -> Element {
                         h3 { "Open or create a workspace to start the pipeline" }
                         p { class: "hint",
                             "A workspace is a folder with workspace.toml, schemas/ and \
-                             data/. The last workspace you used is remembered and \
-                             restored automatically on the next launch."
+                             data/. Type the folder path and press an action — the \
+                             native file dialog is optional (it can crash on some \
+                             systems, so the path field is the reliable way)."
                         }
                         div { class: "toolbar",
                             input {
                                 class: "path-input",
-                                placeholder: "New workspace name (optional)…",
+                                placeholder: "New workspace name (optional; folder name used if empty)…",
                                 value: name_input,
                                 oninput: move |evt: Event<FormData>| name_input.set(evt.value()),
                             }
-                            button {
-                                onclick: move |_| {
-                                    if let Some(dir) = pick_folder("Create a workspace here") {
-                                        let name = name_input.read().trim().to_string();
-                                        actions::create_workspace_ui(dir, name, ws, status);
-                                    }
-                                },
-                                "Create…"
-                            }
-                            button {
-                                onclick: move |_| {
-                                    if let Some(dir) = pick_folder("Open a workspace") {
-                                        actions::open_workspace_ui(dir, ws, status);
-                                    }
-                                },
-                                "Open…"
-                            }
                         }
-
-                        // Typed-path fallback: no native dialog involved. If
-                        // the dialog buttons above crash on your system, use
-                        // these: type the folder path and press the action.
                         div { class: "toolbar",
                             input {
                                 class: "path-input",
-                                placeholder: "Folder path (type it here if the dialog fails)…",
+                                placeholder: "Folder path of the new / existing workspace…",
                                 value: folder_input,
                                 oninput: move |evt: Event<FormData>| folder_input.set(evt.value()),
                             }
@@ -343,7 +323,7 @@ pub fn PipelineHome(props: PipelineHomeProps) -> Element {
                                     let text = folder_input.read().trim().to_string();
                                     if text.is_empty() {
                                         status.set(String::from(
-                                            "type a folder path or use the dialog buttons",
+                                            "type a folder path first",
                                         ));
                                     } else {
                                         let name = name_input.read().trim().to_string();
@@ -355,20 +335,28 @@ pub fn PipelineHome(props: PipelineHomeProps) -> Element {
                                         );
                                     }
                                 },
-                                "Create at path"
+                                "Create workspace"
                             }
                             button {
                                 onclick: move |_| {
                                     let text = folder_input.read().trim().to_string();
                                     if text.is_empty() {
                                         status.set(String::from(
-                                            "type a folder path or use the dialog buttons",
+                                            "type a folder path first",
                                         ));
                                     } else {
                                         actions::open_workspace_ui(PathBuf::from(text), ws, status);
                                     }
                                 },
-                                "Open at path"
+                                "Open workspace"
+                            }
+                            button {
+                                onclick: move |_| {
+                                    if let Some(dir) = pick_folder("Pick a workspace folder") {
+                                        folder_input.set(dir.display().to_string());
+                                    }
+                                },
+                                "Browse…"
                             }
                         }
 
