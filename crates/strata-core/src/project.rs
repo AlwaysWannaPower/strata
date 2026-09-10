@@ -1,78 +1,78 @@
-//! # Project persistence: `project.toml` + saved schemas (M1b, step 3)
+//! # Персистентность проекта: `project.toml` + сохранённые схемы (M1b, шаг 3)
 //!
-//! Layout on disk follows `ТЗ.md` §10 (the minimal version we need now):
+//! Раскладка на диске следует `ТЗ.md` §10 (минимальная версия, нужная сейчас):
 //!
 //! ```text
 //! <project dir>/
-//! ├── project.toml        # metadata: name, version, created
-//! ├── schemas/            # one TOML file per saved schema (a source + its
-//! │                       #   columns + reader options), so a confirmed
-//! │                       #   schema survives a restart
-//! └── logs/               # reserved for run history (later milestone)
+//! ├── project.toml        # метаданные: имя, версия, время создания
+//! ├── schemas/            # один TOML-файл на сохранённую схему (источник + его
+//! │                       #   колонки + опции читалки), чтобы подтверждённая
+//! │                       #   схема переживала перезапуск
+//! └── logs/               # зарезервировано под историю прогонов (позже)
 //! ```
 //!
-//! The schema file stores exactly what the user *confirmed* in the Schemas
-//! screen: the column list (name + inferred/chosen type), the reader options
-//! (encoding / delimiter / header flag) and the source path. It is plain
-//! data — no Polars or Dioxus types leak into the file.
+//! Файл схемы хранит ровно то, что пользователь *подтвердил* на экране Schemas:
+//! список колонок (имя + выведенный/выбранный тип), опции читалки
+//! (кодировка / разделитель / флаг заголовка) и путь источника. Это простые
+//! данные — никакие типы Polars или Dioxus в файл не протекают.
 //!
-//! Reader options are stored as **canonical tokens** (e.g. `"cp1251"`,
-//! `"semicolon"`) rather than raw chars/enums: tokens are stable for humans
-//! editing TOML by hand and easy to migrate. [`encoding_from_token`] /
-//! [`encoding_token`] and [`delimiter_from_token`] / [`delimiter_token`]
-//! convert both ways.
+//! Опции читалки хранятся как **канонические токены** (например `"cp1251"`,
+//! `"semicolon"`), а не как сырые символы/enum: токены стабильны для человека,
+//! правящего TOML руками, и легко мигрируют. [`encoding_from_token`] /
+//! [`encoding_token`] и [`delimiter_from_token`] / [`delimiter_token`]
+//! конвертируют в обе стороны.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::{EncodingChoice, ReaderOptions, StrataError};
 
-/// Current schema-file format version (bump when fields change meaning).
+/// Текущая версия формата файла схемы (поднимайте, когда меняется смысл полей).
 const SCHEMA_FORMAT: u32 = 1;
 
-/// Project metadata stored in `project.toml`.
+/// Метаданные проекта, хранимые в `project.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectMeta {
-    /// Human-readable project name.
+    /// Человекочитаемое имя проекта.
     pub name: String,
-    /// Project file format version.
+    /// Версия формата файла проекта.
     pub version: u32,
-    /// Creation time, UTC ISO-8601 (informational only).
+    /// Время создания, UTC ISO-8601 (только для справки).
     pub created_utc: String,
 }
 
-/// One confirmed column inside a saved schema.
+/// Одна подтверждённая колонка внутри сохранённой схемы.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ColumnDef {
-    /// Column name (header or Polars auto-name).
+    /// Имя колонки (заголовок или авто-имя Polars).
     pub name: String,
-    /// Confirmed Polars type label, e.g. `"i64"`.
+    /// Подтверждённая метка типа Polars, например `"i64"`.
     pub dtype: String,
 }
 
-/// A saved schema: a source file + the confirmed columns + reader options.
+/// Сохранённая схема: исходный файл + подтверждённые колонки + опции читалки.
 ///
-/// `encoding` / `delimiter` hold canonical tokens (`"auto"` when unset).
+/// `encoding` / `delimiter` хранят канонические токены (`"auto"`, когда не заданы).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SchemaFile {
-    /// Schema file format version.
+    /// Версия формата файла схемы.
     pub format: u32,
-    /// Absolute path of the source file this schema describes.
+    /// Абсолютный путь исходного файла, который описывает эта схема.
     pub source: String,
-    /// `false` for header-less files.
+    /// `false` для файлов без заголовка.
     pub has_header: bool,
-    /// Encoding token, e.g. `"auto"`, `"utf8"`, `"cp1251"`, `"cp1252"`, `"utf16le"`, `"utf16be"`.
+    /// Токен кодировки, например `"auto"`, `"utf8"`, `"cp1251"`, `"cp1252"`, `"utf16le"`, `"utf16be"`.
     pub encoding: String,
-    /// Delimiter token, e.g. `"auto"`, `"comma"`, `"semicolon"`, `"tab"`, `"pipe"`.
+    /// Токен разделителя, например `"auto"`, `"comma"`, `"semicolon"`, `"tab"`, `"pipe"`.
     pub delimiter: String,
-    /// Confirmed columns in order.
+    /// Подтверждённые колонки по порядку.
     pub columns: Vec<ColumnDef>,
-    /// When this schema was saved (UTC ISO-8601, informational).
+    /// Когда эта схема была сохранена (UTC ISO-8601, для справки).
     pub saved_utc: String,
 }
 
 impl SchemaFile {
-    /// Build a schema file from current [`ReaderOptions`] + columns.
+    /// Собирает файл схемы из текущих [`ReaderOptions`] + колонок.
     pub fn new(source: PathBuf, options: ReaderOptions, columns: Vec<ColumnDef>) -> Self {
         SchemaFile {
             format: SCHEMA_FORMAT,
@@ -87,11 +87,11 @@ impl SchemaFile {
 }
 
 // ---------------------------------------------------------------------------
-// Project lifecycle
+// Жизненный цикл проекта
 // ---------------------------------------------------------------------------
 
-/// Create a new project directory: writes `project.toml` and creates the
-/// `schemas/` and `logs/` folders. Fails if a project already exists there.
+/// Создаёт директорию нового проекта: пишет `project.toml` и создаёт папки
+/// `schemas/` и `logs/`. Падает, если проект там уже есть.
 pub fn create_project(dir: &Path, name: &str) -> crate::Result<ProjectMeta> {
     let project_file = dir.join("project.toml");
     if project_file.exists() {
@@ -110,8 +110,8 @@ pub fn create_project(dir: &Path, name: &str) -> crate::Result<ProjectMeta> {
     Ok(meta)
 }
 
-/// Open an existing project: returns its metadata, or `None` when the folder
-/// has no `project.toml` (it is simply not a project).
+/// Открывает существующий проект: возвращает его метаданные или `None`, когда в
+/// папке нет `project.toml` (значит, это просто не проект).
 pub fn open_project(dir: &Path) -> crate::Result<Option<ProjectMeta>> {
     let project_file = dir.join("project.toml");
     if !project_file.exists() {
@@ -124,14 +124,15 @@ pub fn open_project(dir: &Path) -> crate::Result<Option<ProjectMeta>> {
 }
 
 // ---------------------------------------------------------------------------
-// Saved schemas
+// Сохранённые схемы
 // ---------------------------------------------------------------------------
 
-/// Persist a schema as `schemas/<safe-name>.toml` inside the project.
+/// Сохраняет схему как `schemas/<safe-name>.toml` внутри проекта.
 ///
-/// `<safe-name>` is derived from the source file name (header-less sources
-/// fall back to a counter), sanitized for file-system safety. Saving twice
-/// overwrites — the latest confirmation wins.
+/// `<safe-name>` выводится из имени исходного файла (для источников без
+/// заголовка используется счётчик) и санитизируется для безопасности файловой
+/// системы. Повторное сохранение перезаписывает — побеждает последнее
+/// подтверждение.
 pub fn save_schema(project_dir: &Path, schema: &SchemaFile) -> crate::Result<String> {
     let file_name = schema_file_name(schema);
     let path = project_dir.join("schemas").join(&file_name);
@@ -141,14 +142,14 @@ pub fn save_schema(project_dir: &Path, schema: &SchemaFile) -> crate::Result<Str
     Ok(file_name)
 }
 
-/// Load one saved schema by its file name (e.g. from [`schema_names`]).
+/// Загружает одну сохранённую схему по имени файла (например, из [`schema_names`]).
 pub fn load_schema(project_dir: &Path, file_name: &str) -> crate::Result<SchemaFile> {
     let path = project_dir.join("schemas").join(file_name);
     let text = std::fs::read_to_string(&path)?;
     toml::from_str(&text).map_err(|e| StrataError::ProjectFile(format!("parse {file_name}: {e}")))
 }
 
-/// List saved schema file names (`.toml` in `schemas/`), sorted.
+/// Перечисляет имена файлов сохранённых схем (`.toml` в `schemas/`), отсортированные.
 pub fn schema_names(project_dir: &Path) -> crate::Result<Vec<String>> {
     let dir = project_dir.join("schemas");
     let mut names: Vec<String> = std::fs::read_dir(&dir)?
@@ -160,7 +161,7 @@ pub fn schema_names(project_dir: &Path) -> crate::Result<Vec<String>> {
     Ok(names)
 }
 
-/// Where the schema file for `schema` should be stored (`schemas/<name>.toml`).
+/// Где должен лежать файл схемы для `schema` (`schemas/<name>.toml`).
 fn schema_file_name(schema: &SchemaFile) -> String {
     let stem = Path::new(&schema.source)
         .file_stem()
@@ -171,7 +172,7 @@ fn schema_file_name(schema: &SchemaFile) -> String {
     format!("{stem}.toml")
 }
 
-/// Replace characters that are invalid/awkward in file names.
+/// Заменяет символы, невалидные/неудобные в именах файлов.
 fn sanitize_file_part(value: &str) -> String {
     let out: String = value
         .chars()
@@ -184,10 +185,10 @@ fn sanitize_file_part(value: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Token <-> value conversions (stable for hand-edited TOML)
+// Преобразования токен <-> значение (стабильны для TOML, правленного руками)
 // ---------------------------------------------------------------------------
 
-/// Canonical token for an encoding option (`"auto"` when unset).
+/// Канонический токен для опции кодировки (`"auto"`, когда не задана).
 pub fn encoding_token(choice: Option<EncodingChoice>) -> &'static str {
     match choice {
         None => "auto",
@@ -199,7 +200,7 @@ pub fn encoding_token(choice: Option<EncodingChoice>) -> &'static str {
     }
 }
 
-/// Parse an encoding token back into an option (`"auto"`/unknown → `None`).
+/// Разбирает токен кодировки обратно в опцию (`"auto"`/неизвестное → `None`).
 pub fn encoding_from_token(token: &str) -> Option<EncodingChoice> {
     match token {
         "utf8" => Some(EncodingChoice::Utf8),
@@ -211,7 +212,7 @@ pub fn encoding_from_token(token: &str) -> Option<EncodingChoice> {
     }
 }
 
-/// Canonical token for a delimiter option (`"auto"` when unset).
+/// Канонический токен для опции разделителя (`"auto"`, когда не задана).
 pub fn delimiter_token(delimiter: Option<char>) -> &'static str {
     match delimiter {
         None => "auto",
@@ -219,11 +220,11 @@ pub fn delimiter_token(delimiter: Option<char>) -> &'static str {
         Some(';') => "semicolon",
         Some('\t') => "tab",
         Some('|') => "pipe",
-        Some(_) => "auto", // unsupported char → auto (cannot round-trip)
+        Some(_) => "auto", // неподдерживаемый символ → auto (round-trip невозможен)
     }
 }
 
-/// Parse a delimiter token back into an option.
+/// Разбирает токен разделителя обратно в опцию.
 pub fn delimiter_from_token(token: &str) -> Option<char> {
     match token {
         "comma" => Some(','),
@@ -234,7 +235,7 @@ pub fn delimiter_from_token(token: &str) -> Option<char> {
     }
 }
 
-/// Current UTC time, ISO-8601-ish (`YYYY-MM-DD HH:MM:SS UTC`) — informational.
+/// Текущее время UTC, в духе ISO-8601 (`YYYY-MM-DD HH:MM:SS UTC`) — для справки.
 fn now_utc() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -270,7 +271,7 @@ mod tests {
         let opened = open_project(&dir).expect("open").expect("exists");
         assert_eq!(opened.name, meta.name);
 
-        // Re-creating over an existing project must fail loudly.
+        // Повторное создание поверх существующего проекта должно громко падать.
         let err = create_project(&dir, "again").expect_err("duplicate create fails");
         assert!(matches!(err, StrataError::ProjectExists(_)));
 
@@ -318,7 +319,7 @@ mod tests {
         assert_eq!(loaded.delimiter, "semicolon");
         assert_eq!(loaded.columns, schema.columns);
 
-        // Token helpers round-trip with the engine types.
+        // Хелперы токенов проходят round-trip с типами движка.
         assert_eq!(
             encoding_from_token(&loaded.encoding),
             Some(EncodingChoice::Windows1251)

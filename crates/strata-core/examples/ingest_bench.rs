@@ -1,28 +1,29 @@
-//! # Ingest benchmark (engine, release build)
+//! # Бенчмарк ingest (движок, release-сборка)
 //!
-//! A tiny, honest benchmark for the raw layer: it generates a CSV with
-//! `ROWS` data rows, then measures:
+//! Крошечный честный бенчмарк для сырого слоя: он генерирует CSV с `ROWS`
+//! строками данных, а затем измеряет:
 //!
-//! 1. `preview_source` (must stay cheap — previews must NOT read whole files);
-//! 2. `source_to_parquet` (full staging of the same file);
-//! 3. peak heap via `mallinfo2`-style… (not portable — we measure wall time and
-//!    rely on the bounded-preview design for memory).
+//! 1. `preview_source` (должен оставаться дешёвым — предпросмотры НЕ должны
+//!    читать файлы целиком);
+//! 2. `source_to_parquet` (полный staging того же файла);
+//! 3. пиковую память в стиле `mallinfo2`… (непортируемо — меряем wall time и
+//!    полагаемся на дизайн с ограниченным предпросмотром ради памяти).
 //!
-//! Run: `./scripts/bench.sh` (release profile with thin-LTO).
+//! Запуск: `./scripts/bench.sh` (release-профиль с thin-LTO).
 //!
-//! These numbers are wall-clock on your machine; use them as *relative* signal
-//! (e.g. after an optimization) rather than absolute truths.
+//! Эти числа — wall-clock на вашей машине; используйте их как *относительный*
+//! сигнал (например, после оптимизации), а не как абсолютную истину.
 
 use std::io::Write;
 use std::time::Instant;
 
 use strata_core::{preview_source, source_to_parquet};
 
-/// Data rows to generate (200k ≈ tens of MB of CSV).
+/// Сколько строк данных генерировать (200k ≈ десятки МБ CSV).
 const ROWS: usize = 200_000;
 
 fn main() {
-    // --- 1. generate the sample file ---------------------------------------
+    // --- 1. генерируем примерный файл --------------------------------------
     let dir = std::env::temp_dir().join("strata_bench");
     std::fs::create_dir_all(&dir).expect("create bench dir");
     let csv_path = dir.join("rows.csv");
@@ -53,7 +54,7 @@ fn main() {
         csv_path
     );
 
-    // --- 2. preview --------------------------------------------------------
+    // --- 2. предпросмотр ---------------------------------------------------
     let t1 = Instant::now();
     let preview = preview_source(&csv_path, 50).expect("preview");
     println!(
@@ -63,7 +64,7 @@ fn main() {
         preview.rows.len()
     );
 
-    // --- 3. full staging -----------------------------------------------------
+    // --- 3. полный staging ---------------------------------------------------
     let t2 = Instant::now();
     let report = source_to_parquet(&csv_path, &parquet_path).expect("stage");
     println!(
@@ -76,8 +77,8 @@ fn main() {
             .unwrap_or(0)
     );
 
-    // --- 4. schema-validated folder staging (2 files) -----------------------
-    // Reuse the same file twice under a folder to exercise folder_to_parquet.
+    // --- 4. staging папки с валидацией схемы (2 файла) ----------------------
+    // Переиспользуем один и тот же файл дважды в папке, чтобы прогнать folder_to_parquet.
     let folder = dir.join("folder");
     std::fs::create_dir_all(&folder).expect("mkdir");
     std::fs::copy(&csv_path, folder.join("a.csv")).expect("copy a");
@@ -91,7 +92,7 @@ fn main() {
         folder_report.total_rows
     );
 
-    // --- 5. cleanup ----------------------------------------------------------
+    // --- 5. уборка -----------------------------------------------------------
     let _ = std::fs::remove_dir_all(&dir);
     println!("done (bench files removed)");
 }

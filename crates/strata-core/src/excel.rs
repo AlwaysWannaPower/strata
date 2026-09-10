@@ -1,20 +1,21 @@
-//! # Excel (XLSX/XLS) support — engine (M2)
+//! # Поддержка Excel (XLSX/XLS) — движок (M2)
 //!
-//! Polars' Rust bindings do **not** read Excel natively, so this module uses
-//! `calamine` (a pure-Rust workbook reader) and then feeds the rows through
-//! the same UTF-8 CSV pipeline the rest of the engine uses — which gives us
-//! Polars type inference, the header option and strict decode for free.
+//! Rust-биндинги Polars **не** читают Excel нативно, поэтому модуль использует
+//! `calamine` (чисто-Rust читалку книг), а затем прогоняет строки через тот же
+//! UTF-8 CSV-пайплайн, что и остальной движок — так мы бесплатно получаем
+//! инференс типов Polars, опцию заголовка и строгое декодирование.
 //!
-//! The conversion is: workbook → (first) sheet → in-memory CSV text →
-//! [`crate::read_text_from_buffer`]. Cost is one sheet-sized buffer per read;
-//! acceptable for staging-layer sizes, and the same "preview reads a bounded
-//! prefix" rule applies via `max_rows` (calamine stops iterating rows early,
-//! so we never load a whole giant sheet just to show 50 rows).
+//! Преобразование такое: книга → (первый) лист → CSV-текст в памяти →
+//! [`crate::read_text_from_buffer`]. Цена — один буфер размером с лист на
+//! чтение; для размеров staging-слоя это приемлемо, и то же правило
+//! «предпросмотр читает ограниченный префикс» работает через `max_rows`
+//! (calamine перестаёт перебирать строки рано, так что мы никогда не грузим
+//! гигантский лист целиком ради показа 50 строк).
 //!
 //! ## Fidelity note (honest)
-//! Data *formatting* (colors, number formats, fonts) is intentionally lost —
-//! we carry values, not presentation. Numbers and strings keep their types;
-//! dates arrive as Excel serial numbers/strings depending on the file.
+//! *Форматирование* данных (цвета, числовые форматы, шрифты) намеренно теряется:
+//! мы переносим значения, а не представление. Числа и строки сохраняют свои типы;
+//! даты приходят как серийные числа Excel или строки — зависит от файла.
 
 use calamine::{Data, Reader, Xlsx};
 use polars::prelude::DataFrame;
@@ -22,14 +23,14 @@ use std::path::Path;
 
 use crate::read_text_from_buffer;
 
-/// Read the first worksheet of an Excel workbook into a Polars `DataFrame`.
+/// Читает первый лист книги Excel в `DataFrame` Polars.
 ///
-/// * `has_header` — first row is column names (same option as for CSV);
-/// * `max_rows: None` reads the whole sheet (staging), `Some(n)` stops early
-///   (preview — cheap even on huge sheets).
+/// * `has_header` — первая строка это имена колонок (та же опция, что и для CSV);
+/// * `max_rows: None` читает весь лист (staging), `Some(n)` останавливается рано
+///   (предпросмотр — дешёвый даже на огромных листах).
 ///
-/// Excel has no single "delimiter", so reader delimiters/encodings do not
-/// apply; values are already decoded Unicode by `calamine`.
+/// В Excel нет единого «разделителя», поэтому разделители/кодировки читалки тут
+/// не применяются; значения уже декодированы в Unicode средствами `calamine`.
 pub fn read_excel_frame(
     path: &Path,
     has_header: bool,
@@ -39,7 +40,7 @@ pub fn read_excel_frame(
         crate::StrataError::Encoding(format!("cannot open workbook {}: {err}", path.display()))
     })?;
 
-    // First sheet by default (sheet selection is a later milestone).
+    // По умолчанию первый лист (выбор листа — отдельный милестон).
     let sheet_name = workbook
         .sheet_names()
         .into_iter()
@@ -49,14 +50,14 @@ pub fn read_excel_frame(
         .worksheet_range(&sheet_name)
         .map_err(|err| crate::StrataError::Encoding(format!("read sheet '{sheet_name}': {err}")))?;
 
-    // Rows as cells → write them as a tiny in-memory CSV that our text reader
-    // can parse with Polars inference. Quotes/commas/newlines are escaped so
-    // cell text never corrupts the CSV shape.
+    // Строки как ячейки → пишем их как крошечный CSV в памяти, который наша
+    // читалка текста разберёт с инференсом типов Polars. Кавычки/запятые/переводы
+    // строк экранируются, чтобы текст ячейки не ломал форму CSV.
     let mut csv = String::with_capacity(64 * 1024);
     let mut emitted_rows = 0usize;
     for (row_index, row) in range.rows().enumerate() {
         if let Some(limit) = max_rows {
-            // Keep the header row, then stop once we emitted enough data rows.
+            // Строку заголовка сохраняем, а как только выдали достаточно строк данных — стоп.
             let data_emitted = if has_header {
                 emitted_rows.saturating_sub(1)
             } else {
@@ -69,16 +70,16 @@ pub fn read_excel_frame(
         emit_csv_row(&mut csv, row)?;
         emitted_rows += 1;
     }
-    // A header-only file still needs a trailing newline for the CSV parser.
+    // Файлу из одного заголовка всё равно нужен завершающий перевод строки для CSV-парсера.
     if !csv.ends_with('\n') {
         csv.push('\n');
     }
 
-    // Reuse the engine's eager CSV parse (comma-delimited, UTF-8 by construction).
+    // Переиспользуем жадный CSV-разбор движка (разделитель — запятая, UTF-8 по построению).
     read_text_from_buffer(csv, ',', has_header, max_rows)
 }
 
-/// Append one sheet row to the in-memory CSV with proper quoting.
+/// Добавляет одну строку листа в CSV в памяти с правильным квотированием.
 fn emit_csv_row(out: &mut String, row: &[Data]) -> crate::Result<()> {
     for (index, cell) in row.iter().enumerate() {
         if index > 0 {
@@ -89,7 +90,7 @@ fn emit_csv_row(out: &mut String, row: &[Data]) -> crate::Result<()> {
             out.push('"');
             for ch in text.chars() {
                 if ch == '"' {
-                    out.push('"'); // escape embedded quotes (CSV convention)
+                    out.push('"'); // экранируем кавычки внутри значения (конвенция CSV)
                 }
                 out.push(ch);
             }
@@ -102,14 +103,14 @@ fn emit_csv_row(out: &mut String, row: &[Data]) -> crate::Result<()> {
     Ok(())
 }
 
-/// Render one Excel cell to text for CSV round-tripping.
+/// Отрисовывает одну ячейку Excel в текст для прогона через CSV.
 fn cell_text(cell: &Data) -> String {
     match cell {
         Data::Int(value) => value.to_string(),
         Data::Float(value) => format_float(*value),
         Data::String(value) => value.clone(),
         Data::Bool(value) => value.to_string(),
-        Data::DateTime(value) => format!("{value}"), // Excel serial date
+        Data::DateTime(value) => format!("{value}"), // серийная дата Excel
         Data::DateTimeIso(value) => value.clone(),
         Data::DurationIso(value) => value.clone(),
         Data::Error(error) => format!("ERROR:{error}"),
@@ -117,8 +118,8 @@ fn cell_text(cell: &Data) -> String {
     }
 }
 
-/// Keep floats readable (`12.5`, not `12.5000000000001`) — a display-level
-/// concern only; Polars will still type the column as f64.
+/// Держит float читаемым (`12.5`, а не `12.5000000000001`) — это забота только
+/// уровня отображения; Polars всё равно типизирует колонку как f64.
 fn format_float(value: f64) -> String {
     if value.fract() == 0.0 && value.abs() < 1e15 {
         format!("{}", value as i64)
@@ -179,7 +180,7 @@ mod tests {
         assert_eq!(preview.rows[0][0], "2026-01-05");
         assert_eq!(preview.rows[0][1], "12.5");
 
-        // Staging an Excel file works through the generic pipeline too.
+        // Staging Excel-файла тоже идёт через общий пайплайн.
         let parquet = path.with_extension("parquet");
         let report = crate::source_to_parquet(&path, &parquet).expect("stage xlsx");
         assert_eq!(report.rows, 2);

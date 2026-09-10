@@ -1,26 +1,26 @@
-//! # Folder sources: a directory = one raw dataset (M1a)
+//! # Источники-папки: директория = один сырой датасет (M1a)
 //!
-//! The product idea (see `ТЗ.md` §2-§6 and `PLAN.md` M1) is that a **folder
-//! with many files** becomes one logical `Source` and, after staging, one
-//! **Parquet dataset** — a directory of `part-*.parquet` files, not a single
-//! giant file.
+//! Продуктовая идея (см. `ТЗ.md` §2-§6 и `PLAN.md` M1) в том, что **папка со
+//! множеством файлов** становится одним логическим `Source`, а после staging —
+//! одним **Parquet-датасетом**: директорией из `part-*.parquet`, а не одним
+//! гигантским файлом.
 //!
-//! This module adds that folder story on top of the single-file staging of
+//! Модуль добавляет эту «папочную» историю поверх staging одного файла из
 //! [`crate::source_to_parquet`]:
 //!
-//! * [`scan_folder`] — list what a folder contains (names, sizes, rough kind)
-//!   for the UI, *without* reading the data;
-//! * [`folder_to_parquet`] — stage every file in a folder into its own
-//!   `NNNN-<name>.parquet` part under a destination directory (each part is a
-//!   faithful raw carry-over, see the staging philosophy in the crate docs);
-//!   per-file failures are collected and reported, not fatal — like a real
-//!   ETL run that keeps going when some file is broken;
-//! * [`preview_parts`] — read back a dataset directory for a combined preview
-//!   (merges only parts whose columns match the first part).
+//! * [`scan_folder`] — перечисляет содержимое папки (имена, размеры, примерный
+//!   вид) для UI, *не* читая данные;
+//! * [`folder_to_parquet`] — стейджит каждый файл папки в свою часть
+//!   `NNNN-<name>.parquet` в директории назначения (каждая часть — достоверный
+//!   перенос сырых данных, см. философию staging в документации крейта);
+//!   ошибки по отдельным файлам собираются в отчёт, но не фатальны — как
+//!   настоящий ETL-прогон, который продолжается, когда один файл битый;
+//! * [`preview_parts`] — читает директорию датасета обратно для общего
+//!   предпросмотра (объединяет только части, чьи колонки совпадают с первой).
 //!
-//! Partitioning by business keys (`year=…/month=…`) and a shared
-//! schema/validation step arrive in the next M1 slice; here every source file
-//! simply becomes one part file.
+//! Партиционирование по бизнес-ключам (`year=…/month=…`) и общий шаг
+//! схемы/валидации появятся в следующем срезе M1; здесь каждый исходный файл
+//! просто становится одним файлом-частью.
 
 use std::fs;
 use std::path::Path;
@@ -29,64 +29,64 @@ use crate::{
     ColumnInfo, Preview, Result, SourceInfo, SourceKind, preview_source, source_to_parquet,
 };
 
-/// One file discovered inside a folder source.
+/// Один файл, найденный внутри источника-папки.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileMeta {
-    /// File name (not the full path) — what the UI shows.
+    /// Имя файла (не полный путь) — то, что показывает UI.
     pub name: String,
-    /// File size in bytes.
+    /// Размер файла в байтах.
     pub size_bytes: u64,
-    /// Rough kind label used for the listing: `CSV`, `TSV`, `Parquet`, …
-    /// (Determined cheaply from extension + magic bytes, *before* real parsing;
-    /// the authoritative per-file detection still happens at staging time.)
+    /// Примерная метка вида для листинга: `CSV`, `TSV`, `Parquet`, …
+    /// (Определяется дёшево по расширению + magic-байтам, *до* настоящего
+    /// разбора; авторитетное определение по файлу происходит при staging.)
     pub kind: String,
 }
 
-/// Result of [`scan_folder`]: everything the UI needs to show a folder source.
+/// Результат [`scan_folder`]: всё, что нужно UI, чтобы показать источник-папку.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FolderScan {
-    /// Files of the folder, sorted by name (deterministic order for the UI).
+    /// Файлы папки, отсортированные по имени (детерминированный порядок для UI).
     pub files: Vec<FileMeta>,
-    /// Sum of file sizes (bytes) — the "12.4 GB" card from `ТЗ.md` §5.
+    /// Сумма размеров файлов (байты) — та самая карточка «12.4 GB» из `ТЗ.md` §5.
     pub total_size_bytes: u64,
 }
 
-/// One successfully staged file inside a dataset directory.
+/// Один успешно застейдженный файл внутри директории датасета.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StagedFile {
-    /// Source file name that produced this part.
+    /// Имя исходного файла, из которого получилась эта часть.
     pub name: String,
-    /// Absolute path of the written `NNNN-….parquet` part.
+    /// Абсолютный путь записанной части `NNNN-….parquet`.
     pub part_path: String,
-    /// Number of data rows staged from this file.
+    /// Сколько строк данных застейджено из этого файла.
     pub rows: u64,
-    /// Number of columns staged from this file.
+    /// Сколько колонок застейджено из этого файла.
     pub columns: usize,
 }
 
-/// Result of [`folder_to_parquet`] — the ETL-style run report.
+/// Результат [`folder_to_parquet`] — отчёт о ETL-прогоне.
 ///
-/// Successful parts land in [`FolderReport::staged`]; files that could not be
-/// read are listed in [`FolderReport::skipped`] with the error text so the
-/// user can see *what* was skipped and *why* (this is the "problems" idea of
-/// `ТЗ.md` §8 in its simplest raw form).
+/// Успешные части попадают в [`FolderReport::staged`]; файлы, которые не
+/// удалось прочитать, перечислены в [`FolderReport::skipped`] с текстом ошибки,
+/// чтобы пользователь видел, *что* пропущено и *почему* (это идея «проблем» из
+/// `ТЗ.md` §8 в самом простом сыром виде).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FolderReport {
-    /// Successfully staged parts.
+    /// Успешно застейдженные части.
     pub staged: Vec<StagedFile>,
-    /// `(file name, error)` pairs for files that could not be staged.
+    /// Пары `(имя файла, ошибка)` для файлов, которые не удалось застейджить.
     pub skipped: Vec<(String, String)>,
-    /// Sum of rows across all staged parts.
+    /// Сумма строк по всем застейдженным частям.
     pub total_rows: u64,
-    /// Destination directory holding the parts.
+    /// Директория назначения, где лежат части.
     pub dest_dir: String,
 }
 
-/// Inspect a folder (non-recursive, top level only in M1a) and describe its
-/// files for the UI.
+/// Смотрит на папку (нерекурсивно, в M1a только верхний уровень) и описывает
+/// её файлы для UI.
 ///
 /// # Errors
-/// Returns [`crate::StrataError::Io`] if the folder cannot be read at all.
+/// Возвращает [`crate::StrataError::Io`], если папку вообще нельзя прочитать.
 pub fn scan_folder(dir: &Path) -> Result<FolderScan> {
     let mut files = Vec::new();
     let mut total_size_bytes = 0u64;
@@ -95,14 +95,14 @@ pub fn scan_folder(dir: &Path) -> Result<FolderScan> {
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.file_type().is_ok_and(|t| t.is_file()))
         .collect();
-    // Deterministic listing: sorting by name keeps the UI stable between runs
-    // and gives the part numbering (`NNNN-…`) a predictable order.
+    // Детерминированный листинг: сортировка по имени держит UI стабильным между
+    // прогонами и даёт нумерации частей (`NNNN-…`) предсказуемый порядок.
     entries.sort_by_key(|entry| entry.file_name());
 
     for entry in entries {
         let name = entry.file_name().to_string_lossy().into_owned();
         if name.starts_with('.') {
-            continue; // hidden files (like .DS_Store) are not data
+            continue; // скрытые файлы (вроде .DS_Store) — не данные
         }
         let path = entry.path();
         let size_bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
@@ -120,8 +120,8 @@ pub fn scan_folder(dir: &Path) -> Result<FolderScan> {
     })
 }
 
-/// Cheap kind label without parsing: Parquet has a `PAR1` magic prefix, text
-/// kinds fall back to the file extension.
+/// Дешёвая метка вида без разбора: у Parquet есть magic-префикс `PAR1`, для
+/// текстовых видов берётся расширение файла.
 fn cheap_kind_label(path: &Path) -> String {
     if let Ok(mut file) = fs::File::open(path) {
         use std::io::Read;
@@ -145,15 +145,16 @@ fn cheap_kind_label(path: &Path) -> String {
     }
 }
 
-/// Stage every file of `src_dir` into a dataset directory `dest_dir`.
+/// Стейджит каждый файл `src_dir` в директорию датасета `dest_dir`.
 ///
-/// Each source file becomes one `NNNN-<stem>.parquet` part. Files that fail to
-/// stage are skipped (with the error kept in the report) so that one broken
-/// file does not stop the whole folder — a deliberate ETL-like behaviour.
+/// Каждый исходный файл становится одной частью `NNNN-<stem>.parquet`. Файлы,
+/// которые не удалось застейджить, пропускаются (ошибка сохраняется в отчёте),
+/// чтобы один битый файл не останавливал всю папку — намеренное ETL-подобное
+/// поведение.
 ///
 /// # Errors
-/// Returns an error only if the destination directory cannot be created.
-/// Per-file problems are reported through [`FolderReport::skipped`].
+/// Ошибка возвращается только если не удалось создать директорию назначения.
+/// Проблемы по отдельным файлам сообщаются через [`FolderReport::skipped`].
 pub fn folder_to_parquet(src_dir: &Path, dest_dir: &Path) -> Result<FolderReport> {
     fs::create_dir_all(dest_dir)?;
 
@@ -163,9 +164,9 @@ pub fn folder_to_parquet(src_dir: &Path, dest_dir: &Path) -> Result<FolderReport
     let mut total_rows = 0u64;
 
     for (index, meta) in scan.files.iter().enumerate() {
-        // Only files we can make sense of are staged. Anything of an unknown
-        // kind (random binaries, system junk) is *reported*, not guessed at —
-        // guessing would violate the "faithful carry-over" staging promise.
+        // Стейджатся только файлы, в которых есть смысл. Всё неизвестного вида
+        // (случайные бинарники, системный мусор) *сообщается*, а не угадывается —
+        // угадывание нарушило бы обещание staging «достоверный перенос».
         if meta.kind == "Other" {
             skipped.push((meta.name.clone(), String::from("unsupported file kind")));
             continue;
@@ -176,8 +177,8 @@ pub fn folder_to_parquet(src_dir: &Path, dest_dir: &Path) -> Result<FolderReport
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| format!("file{index}"));
-        // Numbered prefix keeps parts unique even when two source files share
-        // the same stem ("sales.csv" next to "sales.tsv").
+        // Номерной префикс делает части уникальными, даже когда два исходных
+        // файла имеют один стем ("sales.csv" рядом с "sales.tsv").
         let part_path = dest_dir.join(format!("{index:04}-{stem}.parquet"));
 
         match source_to_parquet(&source_path, &part_path) {
@@ -202,13 +203,13 @@ pub fn folder_to_parquet(src_dir: &Path, dest_dir: &Path) -> Result<FolderReport
     })
 }
 
-/// Stage every file of `src_dir` into a **partitioned** dataset under
-/// `dest_root`, grouping rows by the distinct string values of
-/// `partition_column` (Hive-style `column=value/` directories).
+/// Стейджит каждый файл `src_dir` в **партиционированный** датасет под
+/// `dest_root`, группируя строки по уникальным строковым значениям
+/// `partition_column` (директории в стиле Hive `column=value/`).
 ///
-/// Same ETL semantics as [`folder_to_parquet`]: good files → parts, unknown
-/// kinds / failing files → [`FolderReport::skipped`]. Each source file may
-/// produce several partition directories.
+/// Та же ETL-семантика, что у [`folder_to_parquet`]: хорошие файлы → части,
+/// неизвестные виды / упавшие файлы → [`FolderReport::skipped`]. Каждый исходный
+/// файл может породить несколько директорий партиций.
 pub fn folder_to_parquet_partitioned(
     src_dir: &Path,
     dest_root: &Path,
@@ -254,20 +255,20 @@ pub fn folder_to_parquet_partitioned(
     })
 }
 
-/// One Parquet part file inside a dataset directory (any nesting level).
+/// Один файл-часть Parquet внутри директории датасета (на любом уровне вложенности).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatasetPart {
-    /// Path relative to the dataset root, e.g. `city=Moscow/part-0000-x.parquet`.
+    /// Путь относительно корня датасета, например `city=Moscow/part-0000-x.parquet`.
     pub rel_path: String,
-    /// File size in bytes.
+    /// Размер файла в байтах.
     pub size_bytes: u64,
 }
 
-/// List every Parquet part under `dataset_dir`, recursively (partitioned
-/// datasets nest parts inside `column=value/` folders).
+/// Перечисляет все части Parquet под `dataset_dir` рекурсивно
+/// (в партиционированных датасетах части лежат внутри папок `column=value/`).
 ///
-/// Sorted by relative path for a stable listing. Unknown folders/files other
-/// than `*.parquet` are ignored.
+/// Отсортировано по относительному пути для стабильного листинга. Неизвестные
+/// папки/файлы, кроме `*.parquet`, игнорируются.
 pub fn list_parts(dataset_dir: &Path) -> Result<Vec<DatasetPart>> {
     let mut found = Vec::new();
     collect_parts(dataset_dir, dataset_dir, &mut found)?;
@@ -301,15 +302,16 @@ fn collect_parts(root: &Path, dir: &Path, found: &mut Vec<DatasetPart>) -> Resul
     Ok(())
 }
 
-/// Combined preview of a dataset directory (all `*.parquet` parts, any
-/// nesting depth — plain part files and partitioned layouts).
+/// Общий предпросмотр директории датасета (все части `*.parquet` на любой
+/// глубине вложенности — и простые файлы-части, и партиционированные раскладки).
 ///
-/// Parts are previewed in sorted order. A part whose columns differ from the
-/// first part is skipped (a schema mismatch is a *validation* concern — M2+ —
-/// not something this raw preview should silently guess around).
+/// Части предпросматриваются в отсортированном порядке. Часть, колонки которой
+/// отличаются от первой, пропускается (несоответствие схеме — забота
+/// *валидации*, M2+, а не то, вокруг чего сырой предпросмотр должен молча
+/// угадывать).
 ///
 /// # Errors
-/// Returns [`crate::StrataError::Io`] if the directory cannot be read.
+/// Возвращает [`crate::StrataError::Io`], если директорию нельзя прочитать.
 pub fn preview_parts(dataset_dir: &Path, max_rows: usize) -> Result<Preview> {
     let parts = list_parts(dataset_dir)?;
 
@@ -322,11 +324,11 @@ pub fn preview_parts(dataset_dir: &Path, max_rows: usize) -> Result<Preview> {
         }
         let part_path = dataset_dir.join(&part.rel_path);
         let Ok(preview) = preview_source(&part_path, max_rows - rows.len()) else {
-            continue; // unreadable part: skip silently here; staging would report it
+            continue; // нечитаемая часть: здесь молча пропускаем; staging бы о ней сообщил
         };
         match &columns {
             None => columns = Some(preview.columns),
-            // Only merge when the part matches the shape of the first part.
+            // Объединяем, только когда часть совпадает по форме с первой частью.
             Some(expected) if *expected != preview.columns => continue,
             Some(_) => {}
         }
@@ -336,7 +338,7 @@ pub fn preview_parts(dataset_dir: &Path, max_rows: usize) -> Result<Preview> {
     Ok(Preview {
         columns: columns.unwrap_or_default(),
         rows,
-        // Binary provenance; the UI adds the part count from the listing.
+        // Происхождение бинарного файла; количество частей UI добавит из листинга.
         source: SourceInfo {
             kind: SourceKind::Parquet,
             encoding: String::from("— (binary)"),
@@ -350,7 +352,7 @@ mod tests {
     use std::io::Write;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Unique temp directories so parallel tests never clash.
+    /// Уникальные временные директории, чтобы параллельные тесты не сталкивались.
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
@@ -361,7 +363,7 @@ mod tests {
             n,
             tag
         ));
-        let _ = fs::remove_dir_all(&dir); // clean any stale leftovers
+        let _ = fs::remove_dir_all(&dir); // убираем залежавшиеся остатки
         fs::create_dir_all(&dir).expect("create temp dir");
         dir
     }
@@ -382,7 +384,7 @@ mod tests {
 
         let scan = scan_folder(&dir).expect("scan succeeds");
         assert_eq!(scan.files.len(), 3);
-        // Sorted by name: "notes.txt" < "sales_a.csv" < "sales_b.tsv".
+        // Сортировка по имени: "notes.txt" < "sales_a.csv" < "sales_b.tsv".
         assert_eq!(scan.files[0].kind, "Text");
         assert_eq!(scan.files[1].kind, "CSV");
         assert_eq!(scan.files[2].kind, "TSV");
@@ -403,7 +405,7 @@ mod tests {
                 .as_bytes(),
         )
         .unwrap();
-        // A file that cannot be parsed as data: must be skipped, not fatal.
+        // Файл, который нельзя разобрать как данные: пропускается, но это не фатально.
         fs::write(src.join("broken.dat"), b"\x00\x01\x02not a table").unwrap();
 
         let dest = temp_dir("stage_dst");
@@ -414,7 +416,7 @@ mod tests {
         assert_eq!(report.total_rows, 6, "3 + 3 rows across both parts");
         assert_eq!(report.skipped[0].0, "broken.dat");
 
-        // Every staged file produced a real .parquet part on disk.
+        // Каждый застейдженный файл породил настоящую .parquet-часть на диске.
         let parts: Vec<String> = fs::read_dir(&dest)
             .unwrap()
             .filter_map(|e| e.ok())
@@ -423,7 +425,7 @@ mod tests {
             .collect();
         assert_eq!(parts.len(), 2);
 
-        // And the combined preview returns all rows with the same columns.
+        // А общий предпросмотр возвращает все строки с теми же колонками.
         let preview = preview_parts(&dest, 100).expect("preview parts");
         assert_eq!(preview.columns.len(), 4);
         assert_eq!(preview.rows.len(), 6);
@@ -433,7 +435,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // M1b (step 2): partitioned dataset writes + recursive dataset listing
+    // M1b (шаг 2): партиционированная запись датасета + рекурсивный листинг датасета
     // ------------------------------------------------------------------
 
     #[test]
@@ -455,13 +457,13 @@ mod tests {
         assert_eq!(report.columns, 2);
         assert_eq!(report.partitions, 2, "Moscow + Kazan");
 
-        // Hive-style folders exist and each holds a part file.
+        // Hive-папки существуют, и в каждой лежит файл-часть.
         assert!(dest.join("city=Moscow").is_dir());
         assert!(dest.join("city=Kazan").is_dir());
         let parts = list_parts(&dest).expect("list parts");
         assert_eq!(parts.len(), 2);
 
-        // Recursive combined preview sees every row again.
+        // Рекурсивный общий предпросмотр снова видит все строки.
         let preview = preview_parts(&dest, 100).expect("preview partitioned");
         assert_eq!(preview.columns.len(), 2);
         assert_eq!(preview.rows.len(), 4);
@@ -484,10 +486,10 @@ mod tests {
         assert_eq!(report.skipped[0].0, "junk.dat");
         assert_eq!(report.total_rows, 3);
 
-        // Both cities became partition folders, parts are found recursively.
+        // Оба города стали папками партиций, части находятся рекурсивно.
         assert!(dest.join("city=Moscow").is_dir());
         assert!(dest.join("city=Kazan").is_dir());
-        assert_eq!(list_parts(&dest).expect("list").len(), 3); // 2 Moscow parts + 1 Kazan part
+        assert_eq!(list_parts(&dest).expect("list").len(), 3); // 2 части по Москве + 1 часть по Казани
 
         let _ = fs::remove_dir_all(src);
         let _ = fs::remove_dir_all(dest);
@@ -503,7 +505,7 @@ mod tests {
         let err = crate::source_to_parquet_partitioned(
             &csv,
             &dest,
-            "amount", // Float64 — not partitionable in the raw layer
+            "amount", // Float64 — в сыром слое не партиционируется
             crate::ReaderOptions::default(),
         )
         .expect_err("numeric partition column must fail");

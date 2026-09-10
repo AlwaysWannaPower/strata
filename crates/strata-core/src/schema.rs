@@ -1,18 +1,19 @@
-//! # Schema: column model inferred from real files (M1b, step "Schemas")
+//! # Схема: модель колонок, выведенная из реальных файлов (M1b, шаг «Schemas»)
 //!
-//! The product promise (see `ТЗ.md` §4 and the user story in `PLAN.md`) is
-//! that the user either writes a schema by hand **or** the program proposes
-//! one by reading the tabular files. This module implements the second half:
+//! Продуктовое обещание (см. `ТЗ.md` §4 и пользовательскую историю в `PLAN.md`)
+//! в том, что пользователь либо пишет схему руками, **либо** программа
+//! предлагает её, читая табличные файлы. Этот модуль реализует вторую половину:
 //!
-//! * [`schema_from_file`] — infer the column list + Polars types from one file;
-//! * [`schema_from_folder`] — infer across a folder and report **conflicts**
-//!   (the same column typed differently by different files — `ТЗ.md` §7) and
-//!   **missing** columns per file.
+//! * [`schema_from_file`] — выводит список колонок + типы Polars по одному файлу;
+//! * [`schema_from_folder`] — выводит по папке и сообщает о **конфликтах**
+//!   (одна и та же колонка типизирована по-разному в разных файлах — `ТЗ.md` §7)
+//!   и о **пропущенных** колонках по каждому файлу.
 //!
-//! Types are the string labels Polars produces (e.g. `Int64`, `String`); the
-//! schema itself is deliberately UI-friendly plain data, no Polars types leak
-//! out. Writing the schema into Parquet (casting to the confirmed types)
-//! happens at the "confirm & stage" step that builds on this module.
+//! Типы — это строковые метки, которые выдаёт Polars (например `Int64`, `String`);
+//! сама схема намеренно сделана удобными простыми данными для UI, наружу не
+//! протекает ни один тип Polars. Запись схемы в Parquet (приведение к
+//! подтверждённым типам) происходит на шаге «confirm & stage», который строится
+//! поверх этого модуля.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -25,64 +26,64 @@ use crate::{
     preview_source_with,
 };
 
-/// How many rows of each file we read to infer types. Types are inferred from
-/// the header + a sample of values; reading more than this rarely changes the
-/// answer and only slows inference down.
+/// Сколько строк каждого файла читаем для инференса типов. Типы выводятся по
+/// заголовку + выборке значений; чтение большего объёма редко меняет ответ и
+/// только замедляет инференс.
 const SCHEMA_SAMPLE_ROWS: usize = 200;
 
-/// How many files of a folder are inspected (defence against huge folders).
+/// Сколько файлов папки просматривается (защита от огромных папок).
 const SCHEMA_MAX_FILES: usize = 50;
 
-/// One column of a schema proposal: name + inferred Polars type label.
+/// Одна колонка предложенной схемы: имя + выведенная метка типа Polars.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaColumn {
-    /// Column name (header) or Polars auto-name for header-less files.
+    /// Имя колонки (заголовок) или авто-имя Polars для файлов без заголовка.
     pub name: String,
-    /// Polars data type rendered as a string, e.g. `"Int64"`.
+    /// Тип данных Polars в виде строки, например `"Int64"`.
     pub dtype: String,
 }
 
-/// Schema proposed for a single file.
+/// Схема, предложенная для одного файла.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaProposal {
-    /// Columns in file order.
+    /// Колонки в порядке файла.
     pub columns: Vec<SchemaColumn>,
 }
 
-/// A schema conflict: column `column` is expected to be `expected`, but the
-/// listed files typed it differently (`found` = file → actual type).
+/// Конфликт схемы: колонка `column` ожидается как `expected`, но перечисленные
+/// файлы типизировали её иначе (`found` = файл → фактический тип).
 ///
-/// Mirrors the `⚠ Schema conflict` dialog of `ТЗ.md` §7: the UI shows the
-/// expected type, the found type and the affected files.
+/// Повторяет диалог `⚠ Schema conflict` из `ТЗ.md` §7: UI показывает ожидаемый
+/// тип, найденный тип и затронутые файлы.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaConflict {
-    /// The column with inconsistent types.
+    /// Колонка с несогласованными типами.
     pub column: String,
-    /// The type most files agree on (the "expected" one).
+    /// Тип, с которым согласны большинство файлов («ожидаемый»).
     pub expected: String,
-    /// `(file name, actual dtype)` for every file that disagrees.
+    /// Пары `(имя файла, фактический dtype)` для каждого файла, который расходится.
     pub found: Vec<(String, String)>,
 }
 
-/// Folder-wide schema inference result: proposal + problems.
+/// Результат инференса схемы по папке: предложение + проблемы.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FolderSchema {
-    /// Proposed columns (first-seen order across the inspected files).
+    /// Предложенные колонки (порядок первого появления среди просмотренных файлов).
     pub columns: Vec<SchemaColumn>,
-    /// Columns with type conflicts across files.
+    /// Колонки с конфликтами типов между файлами.
     pub conflicts: Vec<SchemaConflict>,
-    /// Columns missing in some files: `(column, files without it)`.
+    /// Колонки, отсутствующие в некоторых файлах: `(колонка, файлы без неё)`.
     pub missing: Vec<(String, Vec<String>)>,
-    /// Files that could not be read/inferred (with the error text).
+    /// Файлы, которые не удалось прочитать/вывести (с текстом ошибки).
     pub failed: Vec<(String, String)>,
-    /// How many files were successfully inspected.
+    /// Сколько файлов успешно просмотрено.
     pub files_inspected: usize,
 }
 
-/// Infer a schema proposal from a single file by previewing its head.
+/// Выводит предложение схемы по одному файлу, предпросматривая его голову.
 ///
 /// # Errors
-/// Any read/decode/parse error of the file itself.
+/// Любая ошибка чтения/декодирования/разбора самого файла.
 pub fn schema_from_file(path: &Path, options: ReaderOptions) -> crate::Result<SchemaProposal> {
     let preview = preview_source_with(path, SCHEMA_SAMPLE_ROWS, options)?;
     Ok(SchemaProposal {
@@ -97,10 +98,10 @@ pub fn schema_from_file(path: &Path, options: ReaderOptions) -> crate::Result<Sc
     })
 }
 
-/// Infer a folder-wide schema across up to [`SCHEMA_MAX_FILES`] files.
+/// Выводит схему по папке, максимум по [`SCHEMA_MAX_FILES`] файлам.
 ///
-/// Never fails because one file is broken: unreadable files land in
-/// [`FolderSchema::failed`]. See module docs for the merge rules.
+/// Никогда не падает из-за одного битого файла: нечитаемые файлы попадают в
+/// [`FolderSchema::failed`]. Правила слияния см. в документации модуля.
 pub fn schema_from_folder(dir: &Path, options: ReaderOptions) -> crate::Result<FolderSchema> {
     let scan = scan_folder(dir)?;
     let candidates: Vec<&FileMeta> = scan
@@ -110,10 +111,11 @@ pub fn schema_from_folder(dir: &Path, options: ReaderOptions) -> crate::Result<F
         .take(SCHEMA_MAX_FILES)
         .collect();
 
-    // Ordered union of column names (first-seen order), the observed dtype per
-    // file per column, and which files each file actually has.
+    // Упорядоченное объединение имён колонок (в порядке первого появления),
+    // наблюдаемый dtype по каждому файлу и колонке, и то, какие колонки реально
+    // есть в каждом файле.
     let mut column_order: Vec<String> = Vec::new();
-    let mut observed: HashMap<String, Vec<(String, String)>> = HashMap::new(); // col -> (file, dtype)
+    let mut observed: HashMap<String, Vec<(String, String)>> = HashMap::new(); // колонка -> (файл, dtype)
     let mut file_columns: Vec<(String, Vec<String>)> = Vec::new();
     let mut failed: Vec<(String, String)> = Vec::new();
 
@@ -139,9 +141,9 @@ pub fn schema_from_folder(dir: &Path, options: ReaderOptions) -> crate::Result<F
     }
 
     let files_ok = file_columns.len();
-    // Expected type per column = the most common observed type; ties are
-    // broken by file order (the earliest file's type wins), so the proposal
-    // is deterministic across runs.
+    // Ожидаемый тип колонки = самый частый наблюдаемый тип; ничьи разрешаются
+    // по порядку файлов (побеждает тип самого раннего файла), чтобы предложение
+    // было детерминированным между прогонами.
     let mut columns = Vec::with_capacity(column_order.len());
     let mut conflicts = Vec::new();
     for name in &column_order {
@@ -161,7 +163,7 @@ pub fn schema_from_folder(dir: &Path, options: ReaderOptions) -> crate::Result<F
             dtype: expected.clone(),
         });
 
-        // Files whose type differs from the expected one.
+        // Файлы, тип которых отличается от ожидаемого.
         let offenders: Vec<(String, String)> = per_file
             .iter()
             .filter(|(_, dtype)| *dtype != expected)
@@ -176,7 +178,7 @@ pub fn schema_from_folder(dir: &Path, options: ReaderOptions) -> crate::Result<F
         }
     }
 
-    // Columns missing in some inspected files.
+    // Колонки, отсутствующие в некоторых просмотренных файлах.
     let mut missing: Vec<(String, Vec<String>)> = Vec::new();
     for name in &column_order {
         let without: Vec<String> = file_columns
@@ -198,20 +200,19 @@ pub fn schema_from_folder(dir: &Path, options: ReaderOptions) -> crate::Result<F
     })
 }
 
-/// Stage every file of a folder **under a confirmed schema**.
+/// Стейджит каждый файл папки **по подтверждённой схеме**.
 ///
-/// This is the "one folder = one schema" contract made executable: each file
-/// is read with the schema's reader options (encoding/delimiter/header) and
-/// its inferred columns/types are compared with the confirmed
-/// [`SchemaFile`]. A file that does not conform is **not** staged blindly —
-/// it goes to [`FolderReport::skipped`] with a concrete reason (this is where
-/// "either the files match the schema or you get an error" lives, `ТЗ.md` §7
-/// in its raw-layer form). Conforming files become `NNNN-<stem>.parquet`
-/// parts in `dest_dir`.
+/// Это исполняемый контракт «одна папка = одна схема»: каждый файл читается с
+/// опциями читалки из схемы (кодировка/разделитель/заголовок), а его выведенные
+/// колонки/типы сравниваются с подтверждённой [`SchemaFile`]. Файл, который не
+/// подходит, **не** стейджится вслепую — он уходит в [`FolderReport::skipped`] с
+/// конкретной причиной (здесь и живёт правило «либо файлы соответствуют схеме,
+/// либо вы получаете ошибку» — `ТЗ.md` §7 в его виде для сырого слоя).
+/// Подходящие файлы становятся частями `NNNN-<stem>.parquet` в `dest_dir`.
 ///
 /// # Errors
-/// Only a destination write/scan failure is fatal; per-file problems are
-/// reported, never thrown.
+/// Фатален только сбой записи/скана в директории назначения; проблемы по
+/// отдельным файлам сообщаются, но никогда не выбрасываются.
 pub fn stage_folder_with_schema(
     src_dir: &Path,
     dest_dir: &Path,
@@ -220,12 +221,12 @@ pub fn stage_folder_with_schema(
     stage_folder_with_schema_progress(src_dir, dest_dir, schema, |_, _| {})
 }
 
-/// Same as [`stage_folder_with_schema`], but reports progress after every file.
+/// То же, что [`stage_folder_with_schema`], но сообщает прогресс после каждого файла.
 ///
-/// `on_progress(done_files, total_files)` is called once per processed file —
-/// including skipped ones, because "done" means "we are past this file", which
-/// is what a progress bar must show. The web service uses this to stream a
-/// progress fragment while the work runs in a background thread.
+/// `on_progress(done_files, total_files)` вызывается один раз на обработанный
+/// файл — включая пропущенные, потому что «done» значит «мы прошли этот файл», а
+/// именно это и должен показывать прогресс-бар. Веб-сервис использует это, чтобы
+/// стримить фрагмент прогресса, пока работа идёт в фоновом потоке.
 pub fn stage_folder_with_schema_progress<F>(
     src_dir: &Path,
     dest_dir: &Path,
@@ -258,7 +259,7 @@ where
         }
         let source_path = src_dir.join(&meta.name);
 
-        // 1. Verify the file against the confirmed schema before writing.
+        // 1. Проверяем файл на соответствие подтверждённой схеме до записи.
         let proposal = match schema_from_file(&source_path, options) {
             Ok(proposal) => proposal,
             Err(err) => {
@@ -272,7 +273,7 @@ where
             continue;
         }
 
-        // 2. Conforming: full read with the schema's options + write the part.
+        // 2. Подходит: полное чтение с опциями схемы + запись части.
         let stem = source_path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
@@ -280,10 +281,10 @@ where
         let part_path = dest_dir.join(format!("{index:04}-{stem}.parquet"));
         match source_to_parquet_typed(&source_path, &part_path, options, &schema.columns) {
             Ok(report) => {
-                // Full-file type check: inference over the *whole* file can
-                // differ from the sample (a late bad row turns a column into
-                // String). Read the part's real schema (1 row is enough — the
-                // schema lives in the Parquet header) and compare.
+                // Проверка типов по всему файлу: инференс по *всему* файлу может
+                // отличаться от выборки (поздняя плохая строка превращает колонку
+                // в String). Читаем реальную схему части (1 строки достаточно —
+                // схема лежит в заголовке Parquet) и сравниваем.
                 match verify_part_types(&part_path, &schema.columns) {
                     Ok(None) => {
                         total_rows += report.rows;
@@ -321,8 +322,9 @@ where
     })
 }
 
-/// Read the real column types of a written Parquet part and compare them with
-/// the confirmed schema. Returns a mismatch reason or `None` when conforming.
+/// Читает реальные типы колонок записанной части Parquet и сравнивает их с
+/// подтверждённой схемой. Возвращает причину несоответствия или `None`, когда
+/// файл сходится со схемой.
 fn verify_part_types(part: &Path, expected: &[ColumnDef]) -> crate::Result<Option<String>> {
     let frame = LazyFrame::scan_parquet(crate::to_plref_path(part)?, Default::default())?
         .limit(1)
@@ -357,10 +359,10 @@ fn verify_part_types(part: &Path, expected: &[ColumnDef]) -> crate::Result<Optio
     Ok(None)
 }
 
-/// Map a schema type label (as stored in `*.schema.toml`) to a Polars dtype.
+/// Переводит метку типа схемы (как она хранится в `*.schema.toml`) в dtype Polars.
 ///
-/// The set is intentionally small: these are the types the raw layer can
-/// produce and cast between. An unknown label is an error, not a guess.
+/// Набор намеренно маленький: это типы, которые сырой слой умеет порождать и
+/// между которыми умеет приводить. Неизвестная метка — ошибка, а не догадка.
 fn dtype_from_label(label: &str) -> Option<DataType> {
     Some(match label {
         "i8" => DataType::Int8,
@@ -379,19 +381,20 @@ fn dtype_from_label(label: &str) -> Option<DataType> {
     })
 }
 
-/// Are two type labels *compatible* for the "one folder = one schema" rule?
+/// *Совместимы* ли две метки типов по правилу «одна папка = одна схема»?
 ///
-/// Compatibility is wider than equality, but only where widening is lossless
-/// and obvious — the raw layer never guesses:
+/// Совместимость шире равенства, но только там, где расширение типа
+/// безболезненно и очевидно — сырой слой никогда не угадывает:
 ///
-/// * identical types are compatible;
-/// * any integer width may widen to a wider integer (`i32` → `i64`);
-/// * any integer may widen to a float (`i64` → `f64`) — the classic case of a
-///   column that looks integral in one file and fractional in another;
-/// * `f32` may widen to `f64`.
+/// * одинаковые типы совместимы;
+/// * любая целочисленная ширина может расшириться до более широкой (`i32` → `i64`);
+/// * любое целое может расшириться до float (`i64` → `f64`) — классический
+///   случай колонки, которая в одном файле выглядит целой, а в другом дробной;
+/// * `f32` может расшириться до `f64`.
 ///
-/// Everything else (string ↔ number, date ↔ string, …) is a *conversion*, not a
-/// widening, and belongs to the validation/ODS layer — so it stays a mismatch.
+/// Всё остальное (строка ↔ число, дата ↔ строка, …) — это *конвертация*, а не
+/// расширение, и принадлежит слою валидации/ODS, поэтому остаётся
+/// несоответствием.
 fn types_compatible(expected: &str, actual: &str) -> bool {
     if expected == actual {
         return true;
@@ -399,14 +402,14 @@ fn types_compatible(expected: &str, actual: &str) -> bool {
     let expected_rank = numeric_rank(expected);
     let actual_rank = numeric_rank(actual);
     match (expected_rank, actual_rank) {
-        // int -> int (widen), int -> float, float -> float (f32 -> f64)
+        // int -> int (расширение), int -> float, float -> float (f32 -> f64)
         (Some(want), Some(have)) => want >= have,
         _ => false,
     }
 }
 
-/// Numeric ordering used for widening checks: ints 1..4, floats 5..6.
-/// `None` for non-numeric labels.
+/// Числовой порядок для проверок расширения: целые 1..4, float 5..6.
+/// `None` для нечисловых меток.
 fn numeric_rank(label: &str) -> Option<u8> {
     Some(match label {
         "i8" | "u8" => 1,
@@ -419,12 +422,12 @@ fn numeric_rank(label: &str) -> Option<u8> {
     })
 }
 
-/// Stage a file into a Parquet part **cast to the confirmed schema types**.
+/// Стейджит файл в часть Parquet **с приведением к подтверждённым типам схемы**.
 ///
-/// Reads the whole file with the schema's reader options, casts any column
-/// whose type is merely *compatible* (widening, see [`types_compatible`]) to
-/// the declared type, then writes the part. Incompatible types never reach
-/// this function — they are rejected earlier with a readable reason.
+/// Читает весь файл с опциями читалки из схемы, приводит любую колонку, чей тип
+/// лишь *совместим* (расширение, см. [`types_compatible`]), к объявленному типу,
+/// затем пишет часть. Несовместимые типы сюда никогда не доходят — их отсекают
+/// раньше с понятной причиной.
 pub fn source_to_parquet_typed(
     path: &Path,
     part_path: &Path,
@@ -462,10 +465,10 @@ pub fn source_to_parquet_typed(
     })
 }
 
-/// Compare the confirmed schema columns with what a file actually exposes.
+/// Сравнивает колонки подтверждённой схемы с тем, что реально отдаёт файл.
 ///
-/// Returns a human reason for the first mismatch (order, name or type), or
-/// `None` when the file conforms.
+/// Возвращает человеческую причину первого несоответствия (порядок, имя или
+/// тип) или `None`, когда файл подходит.
 fn schema_mismatch(expected: &[ColumnDef], actual: &[SchemaColumn]) -> Option<String> {
     if expected.len() != actual.len() {
         return Some(format!(
@@ -537,7 +540,7 @@ mod tests {
         let path = temp_path("noheader.csv");
         write_text(&path, "1,2026-01-02\n2,2026-01-03\n");
 
-        // With default options the first row would be eaten as a header.
+        // С опциями по умолчанию первая строка была бы съедена как заголовок.
         let with_header = schema_from_file(&path, ReaderOptions::default()).expect("infer");
         assert_eq!(with_header.columns.len(), 2); // id + date
 
@@ -547,7 +550,7 @@ mod tests {
         };
         let proposal = schema_from_file(&path, options).expect("infer no-header");
         assert_eq!(proposal.columns.len(), 2);
-        // Values are now data, and names are Polars auto-names ("column_…").
+        // Теперь значения — это данные, а имена — авто-имена Polars ("column_…").
         assert!(proposal.columns[0].name.starts_with("column_"));
         assert_eq!(proposal.columns[0].dtype, "i64");
 
@@ -558,7 +561,7 @@ mod tests {
     fn folder_schema_reports_type_conflicts_between_files() {
         let dir = temp_path("dir");
         std::fs::create_dir_all(&dir).expect("mkdir");
-        // a.csv: amount is a number. b.csv: same column is text.
+        // a.csv: amount — число. b.csv: та же колонка — текст.
         write_text(&dir.join("a.csv"), "id,amount\n1,12.5\n2,7.25\n");
         write_text(&dir.join("b.csv"), "id,amount\n3,n/a\n4,unknown\n");
 
@@ -566,13 +569,13 @@ mod tests {
         assert_eq!(report.files_inspected, 2);
         assert!(report.failed.is_empty());
 
-        // Both files were read; `amount` must be flagged as conflicting.
+        // Оба файла прочитаны; `amount` должна быть помечена как конфликтующая.
         let amount_conflict = report
             .conflicts
             .iter()
             .find(|c| c.column == "amount")
             .expect("amount conflict present");
-        assert_eq!(amount_conflict.expected, "f64"); // tie → first file wins
+        assert_eq!(amount_conflict.expected, "f64"); // ничья → побеждает первый файл
         assert_eq!(amount_conflict.found.len(), 1);
         assert_eq!(amount_conflict.found[0].0, "b.csv");
         assert_eq!(amount_conflict.found[0].1, "str");
@@ -586,15 +589,15 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("mkdir");
         write_text(&dir.join("full.csv"), "id,name,extra\n1,A,9\n");
         write_text(&dir.join("short.csv"), "id,name\n2,B\n");
-        // An unknown-kind file is not attempted (like folder staging): it is
-        // simply not part of the schema picture.
+        // Файл неизвестного вида не пробуем (как и в folder staging): он просто
+        // не является частью картины схемы.
         fs_write(&dir.join("broken.dat"), b"\x00\x01\x02 not text at all");
 
         let report = schema_from_folder(&dir, ReaderOptions::default()).expect("folder infer");
         assert_eq!(report.files_inspected, 2);
         assert!(report.failed.is_empty());
 
-        // `extra` exists only in full.csv.
+        // `extra` есть только в full.csv.
         let extra_missing = report
             .missing
             .iter()
@@ -637,7 +640,7 @@ mod tests {
     }
 
     fn conform_csv(text: &str) -> String {
-        // id,amount,name with numeric amount and a string name.
+        // id,amount,name: amount числовой, name строковый.
         format!("id,amount,name\n{text}")
     }
 
@@ -669,7 +672,7 @@ mod tests {
         let dir = temp_path("sv_bad");
         std::fs::create_dir_all(&dir).unwrap();
         write_text(&dir.join("good.csv"), &conform_csv("1,12.5,Alpha\n"));
-        // amount is text here — violates the confirmed f64 schema.
+        // Здесь amount — текст, что нарушает подтверждённую схему f64.
         write_text(&dir.join("bad.csv"), "id,amount,name\n2,n/a,Beta\n");
         let dest = temp_path("sv_bad_dst");
 
@@ -689,8 +692,9 @@ mod tests {
 
     #[test]
     fn schema_reader_options_are_applied_during_validated_stage() {
-        // A windows-1251, semicolon-delimited file bound to a schema that says
-        // so: staging must use those options and read Russian cleanly.
+        // Файл windows-1251 с разделителем ';', привязанный к схеме, которая это
+        // и утверждает: staging должен использовать эти опции и чисто прочитать
+        // русский текст.
         let dir = temp_path("sv_opts");
         std::fs::create_dir_all(&dir).unwrap();
         let text = "дата;сумма\n2026-01-05;12.50\n2026-01-06;7.25\n";
@@ -740,7 +744,7 @@ mod tests {
             })
             .expect("stage");
         assert_eq!(report.staged.len(), 2);
-        // One callback per file, monotonically increasing, denominator stable.
+        // Один колбэк на файл, монотонно растёт, знаменатель стабилен.
         assert_eq!(seen, vec![(1, 2), (2, 2)]);
 
         let _ = std::fs::remove_dir_all(dir);
@@ -749,9 +753,9 @@ mod tests {
 
     #[test]
     fn numeric_widening_is_accepted_and_cast_to_the_schema_type() {
-        // One file has fractional amounts (f64), the other integral (i64).
-        // The confirmed schema says f64: i64 is a *widening*, so BOTH files
-        // must stage, and the written part must really be f64.
+        // В одном файле суммы дробные (f64), в другом целые (i64).
+        // Подтверждённая схема говорит f64: i64 — это *расширение*, поэтому оба
+        // файла должны застейджиться, а записанная часть обязана быть f64.
         let dir = temp_path("widening");
         std::fs::create_dir_all(&dir).unwrap();
         write_text(&dir.join("a.csv"), &conform_csv("1,12.5,Alpha\n"));
@@ -768,7 +772,7 @@ mod tests {
         assert!(report.skipped.is_empty());
         assert_eq!(report.total_rows, 2);
 
-        // Verify the *written* types: every part must have f64 amount.
+        // Проверяем *записанные* типы: в каждой части amount обязан быть f64.
         let parts = crate::list_parts(&dest).expect("parts");
         assert_eq!(parts.len(), 2);
         for part in &parts {
@@ -793,7 +797,7 @@ mod tests {
 
     #[test]
     fn incompatible_types_are_still_rejected() {
-        // str vs f64 is a conversion, not a widening: stays an error.
+        // str против f64 — это конвертация, а не расширение: остаётся ошибкой.
         assert!(!types_compatible("f64", "str"));
         assert!(!types_compatible("str", "i64"));
         assert!(types_compatible("f64", "i64"));
@@ -804,10 +808,11 @@ mod tests {
 
     #[test]
     fn validated_stage_rejects_late_row_type_drift() {
-        // The first 100 rows (Polars' sample for inference) are numeric, so the
-        // sample-based schema check passes — but row ~102 contains "n/a", which
-        // turns the whole column into String on a full read. The full-file type
-        // check must reject the file instead of staging a wrong-typed part.
+        // Первые 100 строк (выборка Polars для инференса) числовые, поэтому
+        // проверка схемы по выборке проходит — но строка ~102 содержит "n/a",
+        // что превращает всю колонку в String при полном чтении. Проверка типов
+        // по всему файлу должна отклонить файл, а не записать часть с неверным
+        // типом.
         let dir = temp_path("sv_drift");
         std::fs::create_dir_all(&dir).unwrap();
         let mut content = String::from("id,amount,name\n");
@@ -826,9 +831,9 @@ mod tests {
         );
         assert_eq!(report.skipped.len(), 1);
         assert_eq!(report.skipped[0].0, "drift.csv");
-        // The rejection reason is either our explicit full-file type check or
-        // Polars' own strict parse error for the bad value — both mean the file
-        // was never staged with a wrong type.
+        // Причина отклонения — либо наша явная проверка типов по всему файлу,
+        // либо собственная строгая ошибка разбора Polars на плохом значении;
+        // и то и другое значит, что файл не был застейджен с неверным типом.
         let reason_ok = report.skipped[0].1.contains("full-file type check")
             || report.skipped[0].1.contains("n/a");
         assert!(
@@ -836,7 +841,7 @@ mod tests {
             "reason explains rejection: {}",
             report.skipped[0].1
         );
-        // No leftover part on disk either.
+        // И никакой оставшейся части на диске.
         assert_eq!(crate::list_parts(&dest).expect("parts").len(), 0);
 
         let _ = std::fs::remove_dir_all(dir);

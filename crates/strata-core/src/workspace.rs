@@ -1,66 +1,67 @@
-//! # Workspace model (M1c): IDE-like settings folder + `data/` outputs
+//! # Модель воркспейса (M1c): папка настроек в духе IDE + вывод в `data/`
 //!
-//! Layout (see `docs/design-workspace-pipeline.md`):
+//! Раскладка (см. `docs/design-workspace-pipeline.md`):
 //!
 //! ```text
 //! <workspace>/
-//! ├── workspace.toml     # name, data_dir, bindings (folder→entity), scan roots
-//! ├── schemas/           # *.schema.toml — confirmed schemas (project.rs helpers)
-//! ├── data/<entity>/     # staged Parquet parts go here (default data_dir = "data")
-//! ├── plugins/           # reserved
-//! └── logs/              # reserved
+//! ├── workspace.toml     # имя, data_dir, привязки (папка→сущность), scan roots
+//! ├── schemas/           # *.schema.toml — подтверждённые схемы (хелперы project.rs)
+//! ├── data/<entity>/     # сюда пишутся части Parquet (data_dir по умолчанию = "data")
+//! ├── plugins/           # зарезервировано
+//! └── logs/              # зарезервировано
 //! ```
 //!
-//! Core rule: **one folder = one schema**. Two binding modes:
+//! Главное правило: **одна папка = одна схема**. Два режима привязки:
 //!
-//! * explicit [`Binding`] — user said "folder X is entity `sales`";
-//! * scan roots — user gave a root; its **direct subfolders** are candidate
-//!   entities (mode B). Roots are remembered here; candidates are discovered
-//!   at scan time and become explicit bindings only after the user confirms.
+//! * явный [`Binding`] — пользователь сказал «папка X это сущность `sales`»;
+//! * scan roots — пользователь дал корень; его **прямые подпапки** — кандидаты
+//!   в сущности (режим B). Корни запоминаются здесь; кандидаты находятся во
+//!   время скана и становятся явными привязками только после подтверждения
+//!   пользователем.
 //!
-//! Schemas themselves are stored/loaded by the existing `project.rs` helpers
-//! (the schema file format is shared); this module owns the *workspace
-//! configuration* only.
+//! Сами схемы хранит и загружает существующий набор хелперов `project.rs`
+//! (формат файла схемы общий); этот модуль владеет только *конфигурацией
+//! воркспейса*.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::StrataError;
 
-/// Configuration file format version.
+/// Версия формата файла конфигурации.
 const CONFIG_FORMAT: u32 = 1;
 
-/// One confirmed mapping: a folder whose files belong to one entity/schema.
+/// Одна подтверждённая привязка: папка, файлы которой принадлежат одной сущности/схеме.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Binding {
-    /// Logical table name (also the schema file name and the `data/<entity>/` dir).
+    /// Имя логической таблицы (оно же имя файла схемы и директория `data/<entity>/`).
     pub entity: String,
-    /// Absolute folder path holding the entity's files.
+    /// Абсолютный путь папки с файлами сущности.
     pub folder: String,
-    /// When the binding was added (UTC, informational).
+    /// Когда привязка была добавлена (UTC, для справки).
     pub added_utc: String,
 }
 
-/// Everything the workspace knows about its sources, stored in
+/// Всё, что воркспейс знает о своих источниках, хранится в
 /// `workspace.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceConfig {
-    /// File format version.
+    /// Версия формата файла.
     pub format: u32,
-    /// Human name of the workspace.
+    /// Человеческое имя воркспейса.
     pub name: String,
-    /// Directory (relative to the workspace) where Parquet outputs live.
+    /// Директория (относительно воркспейса), где лежат результаты Parquet.
     pub data_dir: String,
-    /// Confirmed folder→entity mappings (mode A and confirmed mode B).
+    /// Подтверждённые привязки папка→сущность (режим A и подтверждённый режим B).
     #[serde(default)]
     pub bindings: Vec<Binding>,
-    /// Roots scanned for candidate entities (mode B). Candidates become
-    /// bindings only after user confirmation.
+    /// Корни, сканируемые на сущности-кандидаты (режим B). Кандидаты становятся
+    /// привязками только после подтверждения пользователем.
     #[serde(default)]
     pub scan_roots: Vec<String>,
 }
 
-/// Absolute path where this workspace stores its Parquet datasets.
+/// Абсолютный путь, где этот воркспейс хранит свои Parquet-датасеты.
 pub fn data_dir(workspace_dir: &Path, config: &WorkspaceConfig) -> PathBuf {
     let path = PathBuf::from(&config.data_dir);
     if path.is_absolute() {
@@ -70,12 +71,12 @@ pub fn data_dir(workspace_dir: &Path, config: &WorkspaceConfig) -> PathBuf {
     }
 }
 
-/// Absolute path of the workspace's `schemas/` folder.
+/// Абсолютный путь папки `schemas/` воркспейса.
 pub fn schemas_dir(workspace_dir: &Path) -> PathBuf {
     workspace_dir.join("schemas")
 }
 
-/// Create a new workspace directory (fails if `workspace.toml` already exists).
+/// Создаёт директорию нового воркспейса (падает, если `workspace.toml` уже есть).
 pub fn create_workspace(dir: &Path, name: &str) -> crate::Result<WorkspaceConfig> {
     if dir.join("workspace.toml").exists() {
         return Err(StrataError::ProjectExists(dir.to_path_buf()));
@@ -94,7 +95,7 @@ pub fn create_workspace(dir: &Path, name: &str) -> crate::Result<WorkspaceConfig
     Ok(config)
 }
 
-/// Open a workspace: returns its config, or `None` if the folder is not one.
+/// Открывает воркспейс: возвращает его конфиг или `None`, если папка не является воркспейсом.
 pub fn open_workspace(dir: &Path) -> crate::Result<Option<WorkspaceConfig>> {
     let file = dir.join("workspace.toml");
     if !file.exists() {
@@ -106,7 +107,7 @@ pub fn open_workspace(dir: &Path) -> crate::Result<Option<WorkspaceConfig>> {
     Ok(Some(config))
 }
 
-/// Persist the config back to `workspace.toml` (whole-file rewrite).
+/// Сохраняет конфиг обратно в `workspace.toml` (перезапись файла целиком).
 pub fn save_config(dir: &Path, config: &WorkspaceConfig) -> crate::Result<()> {
     let text = toml::to_string(config)
         .map_err(|e| StrataError::ProjectFile(format!("serialize workspace.toml: {e}")))?;
@@ -114,9 +115,9 @@ pub fn save_config(dir: &Path, config: &WorkspaceConfig) -> crate::Result<()> {
     Ok(())
 }
 
-/// Direct subfolders of `root` (mode B candidates); files/symlinks ignored.
-/// Sub-subfolders are deliberately not returned: one level only — the design
-/// rule is "no nesting under an entity folder".
+/// Прямые подпапки `root` (кандидаты режима B); файлы/симлинки игнорируются.
+/// Под-подпапки намеренно не возвращаются: только один уровень — правило
+/// дизайна «никакой вложенности внутри папки сущности».
 pub fn list_entity_candidates(root: &Path) -> crate::Result<Vec<PathBuf>> {
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(root)?
         .filter_map(|entry| entry.ok())
@@ -128,7 +129,7 @@ pub fn list_entity_candidates(root: &Path) -> crate::Result<Vec<PathBuf>> {
     Ok(dirs)
 }
 
-/// Human name for the candidate folder (its directory name).
+/// Человеческое имя для папки-кандидата (её имя директории).
 pub fn candidate_entity_name(folder: &Path) -> String {
     folder
         .file_name()
@@ -136,14 +137,14 @@ pub fn candidate_entity_name(folder: &Path) -> String {
         .unwrap_or_else(|| "entity".to_string())
 }
 
-/// Add (or replace) a confirmed folder→entity binding and persist the config.
+/// Добавляет (или заменяет) подтверждённую привязку папка→сущность и сохраняет конфиг.
 pub fn upsert_binding(
     dir: &Path,
     config: &mut WorkspaceConfig,
     entity: String,
     folder: PathBuf,
 ) -> crate::Result<()> {
-    // Replace any previous binding for the same entity (latest wins).
+    // Заменяем любую предыдущую привязку для той же сущности (побеждает последняя).
     config.bindings.retain(|b| b.entity != entity);
     config.bindings.push(Binding {
         entity,
@@ -199,7 +200,7 @@ mod tests {
     #[test]
     fn entity_candidates_are_direct_subfolders_only() {
         let root = temp_dir("root");
-        std::fs::create_dir_all(root.join("sales/inner")).unwrap(); // deeper dir must NOT be a candidate
+        std::fs::create_dir_all(root.join("sales/inner")).unwrap(); // более глубокая директория НЕ кандидат
         std::fs::create_dir_all(root.join("clients")).unwrap();
         std::fs::write(root.join("notes.txt"), "x").unwrap();
 
@@ -208,7 +209,7 @@ mod tests {
             .iter()
             .map(|p| candidate_entity_name(p))
             .collect();
-        // Direct subfolders only: sales, clients — NOT sales/inner, NOT the file.
+        // Только прямые подпапки: sales, clients — НЕ sales/inner и НЕ файл.
         assert_eq!(names, vec!["clients", "sales"]);
         let _ = std::fs::remove_dir_all(root);
     }

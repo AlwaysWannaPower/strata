@@ -1,33 +1,33 @@
-//! # strata-core — data engine of the Strata workbench.
+//! # strata-core — движок данных воркбенча Strata.
 //!
-//! This crate owns every piece of data logic that touches Polars / Arrow / Parquet.
-//! It deliberately has **no UI dependencies**: the desktop application (and, later,
-//! a CLI) sits on top of this library and only exchanges plain owned data
-//! structures ([`Preview`], [`ImportReport`]) with it.
+//! Крейт владеет всей логикой данных, которая работает с Polars / Arrow / Parquet.
+//! У него сознательно **нет UI-зависимостей**: десктопное приложение (а позже и
+//! CLI) сидит поверх этой библиотеки и обменивается с ней только простыми
+//! owned-структурами ([`Preview`], [`ImportReport`]).
 //!
 //! ## Staging philosophy (important, see `PLAN.md`)
 //!
-//! This module implements the **raw/staging layer** of the product:
-//! `File → Parquet`. "Raw" does **not** mean "bytes as they are": it means we
-//! carry the data over *faithfully* — the right encoding (no mojibake), the
-//! right delimiter, headers, and per-column types from Polars inference.
-//! We do **not** fix business-level problems here (negative amounts, broken
-//! emails, duplicates…). Those belong to the validation/normalization layer
-//! that turns a staging dataset into an ODS (see `ТЗ.md`: File → Schema →
-//! Validate → Normalize → Parquet → ODS). If mojibake gets into staging, no
-//! later rule can repair it — hence encoding support lives here, in the raw
-//! layer, not in ODS.
+//! Модуль реализует **сырой слой (raw/staging)** продукта: `File → Parquet`.
+//! «Сырой» **не** значит «байты как есть»: это значит, что мы переносим данные
+//! *достоверно* — правильная кодировка (без моджибейка), правильный разделитель,
+//! заголовки и типы колонок из инференса типов Polars. Проблемы бизнес-уровня мы
+//! здесь **не** чиним (отрицательные суммы, битые email, дубликаты…). Это дело
+//! слоя валидации/нормализации, который превращает staging-датасет в ODS
+//! (см. `ТЗ.md`: File → Schema → Validate → Normalize → Parquet → ODS). Если
+//! моджибейк попал в staging, ни одно правило позже его не починит — поэтому
+//! поддержка кодировок живёт здесь, в сыром слое, а не в ODS.
 //!
 //! ## Formats & encodings supported (M0.1)
 //!
-//! * Delimited text — CSV/TSV/`;`-separated/`|`-separated (auto-detected
-//!   delimiter) and
-//! * Apache Parquet (native columns, no text decoding needed).
+//! * Текст с разделителями — CSV/TSV/`;`/`|` (разделитель определяется
+//!   автоматически) и
+//! * Apache Parquet (нативные колонки, декодирование текста не нужно).
 //!
-//! Encodings for text files: UTF-8 (with or without BOM), UTF-16 LE/BE (BOM),
-//! windows-1251, windows-1252. Detection is automatic: BOM wins, then a strict
-//! UTF-8 check, then a small Cyrillic heuristic between windows-1251/1252.
-//! A human override (explicit "treat as …") is planned for the schema step in M1.
+//! Кодировки текстовых файлов: UTF-8 (с BOM и без), UTF-16 LE/BE (BOM),
+//! windows-1251, windows-1252. Определение автоматическое: BOM выигрывает,
+//! затем строгая проверка UTF-8, затем небольшая кириллическая эвристика между
+//! windows-1251/1252. Ручное переопределение («читать как …») запланировано на
+//! шаге схемы в M1.
 
 use encoding_rs::WINDOWS_1251;
 use polars::prelude::*;
@@ -35,7 +35,7 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-/// Folder sources: a directory becomes one dataset directory of Parquet parts
+/// Источники-папки: директория становится одним датасетом из Parquet-частей
 /// ([`folder::scan_folder`], [`folder::folder_to_parquet`], [`folder::preview_parts`]).
 pub mod folder;
 pub use folder::{
@@ -43,8 +43,8 @@ pub use folder::{
     folder_to_parquet_partitioned, list_parts, preview_parts, scan_folder,
 };
 
-/// Schema inference from files/folders ([`schema::schema_from_file`],
-/// [`schema::schema_from_folder`]) — the "Schemas" milestone of M1b.
+/// Инференс типов схемы по файлам/папкам ([`schema::schema_from_file`],
+/// [`schema::schema_from_folder`]) — милестон «Schemas» из M1b.
 pub mod schema;
 pub use schema::{
     FolderSchema, SchemaColumn, SchemaConflict, SchemaProposal, schema_from_file,
@@ -52,22 +52,22 @@ pub use schema::{
     stage_folder_with_schema_progress,
 };
 
-/// Project persistence: `project.toml`, saved schemas, token helpers.
+/// Персистентность проекта: `project.toml`, сохранённые схемы, хелперы токенов.
 pub mod project;
 pub use project::{
     ColumnDef, ProjectMeta, SchemaFile, create_project, delimiter_from_token, delimiter_token,
     encoding_from_token, encoding_token, load_schema, open_project, save_schema, schema_names,
 };
 
-/// The **application API**: the stable façade that frontends (axum web today)
-/// are supposed to call instead of engine internals.
+/// **Прикладной API**: стабильный фасад, который фронтенды (сегодня — axum web)
+/// должны вызывать вместо внутренностей движка.
 pub mod api;
 
-/// Excel (XLSX/XLS) reading via calamine + the engine's CSV pipeline.
+/// Чтение Excel (XLSX/XLS) через calamine + CSV-пайплайн движка.
 pub mod excel;
 pub use excel::read_excel_frame;
 
-/// Workspace model (M1c): config + bindings + scan roots + entity candidates.
+/// Модель воркспейса (M1c): конфиг + привязки + scan roots + кандидаты в сущности.
 pub mod workspace;
 pub use workspace::{
     Binding, WorkspaceConfig, candidate_entity_name, create_workspace, data_dir,
@@ -75,65 +75,65 @@ pub use workspace::{
 };
 
 // ---------------------------------------------------------------------------
-// Public domain types
+// Публичные доменные типы
 // ---------------------------------------------------------------------------
 
-/// Crate-wide error type.
+/// Тип ошибки на весь крейт.
 ///
-/// Wraps the three error sources the engine can hit: the OS file system,
-/// Polars itself, and text decoding (encodings).
+/// Оборачивает три источника ошибок, с которыми может столкнуться движок:
+/// файловую систему ОС, сам Polars и декодирование текста (кодировки).
 #[derive(Debug, Error)]
 pub enum StrataError {
-    /// Polars needs a UTF-8 path; a path that is not valid UTF-8 cannot be used.
+    /// Polars нужен UTF-8-путь; путь, не являющийся валидным UTF-8, использовать нельзя.
     #[error("path is not valid UTF-8: {0}")]
     NonUtf8Path(PathBuf),
 
-    /// An operating-system error (file not found, permission denied, ...).
+    /// Ошибка операционной системы (файл не найден, нет прав доступа, ...).
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// An error raised by the Polars engine.
+    /// Ошибка, поднятая движком Polars.
     #[error("data engine error: {0}")]
     Engine(#[from] PolarsError),
 
-    /// The file bytes could not be decoded with the detected charset.
+    /// Байты файла не удалось декодировать определённой кодировкой.
     #[error("cannot decode file: {0}")]
     Encoding(String),
 
-    /// A partitioning column must hold string values (M1b, partitioned writes).
+    /// Колонка партиционирования должна содержать строковые значения (M1b, партиционированная запись).
     #[error("partition column must be a string column: {0}")]
     PartitionColumn(String),
 
-    /// A project directory already contains `project.toml`.
+    /// В директории проекта уже лежит `project.toml`.
     #[error("project already exists: {0}")]
     ProjectExists(PathBuf),
 
-    /// Project/schema TOML could not be serialized or parsed.
+    /// TOML проекта/схемы не удалось сериализовать или разобрать.
     #[error("project file error: {0}")]
     ProjectFile(String),
 
-    /// A schema asks for a column type the engine does not know how to build.
+    /// Схема требует тип колонки, который движок не умеет строить.
     #[error("unsupported schema type: {0}")]
     SchemaType(String),
 }
 
-/// Convenience alias used by every public function of this crate.
+/// Удобный алиас, используемый каждой публичной функцией крейта.
 pub type Result<T> = std::result::Result<T, StrataError>;
 
-/// What kind of source file we are dealing with.
+/// С каким видом исходного файла мы имеем дело.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceKind {
-    /// A delimited text file (CSV, TSV, `;`-separated, ...) with the detected
-    /// delimiter. Carried as `char` for easy display; Polars wants `u8`.
+    /// Текстовый файл с разделителями (CSV, TSV, `;`-разделитель, ...) и
+    /// определённым разделителем. Хранится как `char` для удобного показа; Polars хочет `u8`.
     DelimitedText { delimiter: char },
-    /// An Apache Parquet file (columnar, binary).
+    /// Файл Apache Parquet (колоночный, бинарный).
     Parquet,
-    /// An Excel workbook (first worksheet is read).
+    /// Книга Excel (читается первый лист).
     Excel,
 }
 
 impl SourceKind {
-    /// Short human label used in UI summaries, e.g. `CSV` / `Parquet`.
+    /// Короткая человеческая метка для сводок в UI, например `CSV` / `Parquet`.
     pub fn label(&self) -> &'static str {
         match self {
             SourceKind::DelimitedText { delimiter: ',' } => "CSV",
@@ -145,16 +145,16 @@ impl SourceKind {
     }
 }
 
-/// Provenance facts about a loaded source file: format + encoding.
+/// Факты о происхождении загруженного файла: формат + кодировка.
 ///
-/// Shown to the user so they can *verify* the raw layer did not silently
-/// misread their file (this is the whole point of the staging philosophy above).
+/// Показываются пользователю, чтобы он мог *проверить*, что сырой слой не
+/// прочитал его файл молча и неправильно (в этом весь смысл философии staging выше).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceInfo {
-    /// Detected file kind.
+    /// Определённый вид файла.
     pub kind: SourceKind,
-    /// Detected text encoding, e.g. `"UTF-8"`, `"windows-1251"`, `"UTF-16 LE"`.
-    /// Parquet files are binary: encoding is `"—"`.
+    /// Определённая кодировка текста, например `"UTF-8"`, `"windows-1251"`, `"UTF-16 LE"`.
+    /// Файлы Parquet бинарные: кодировка — `"—"`.
     pub encoding: String,
 }
 
@@ -168,7 +168,7 @@ impl Default for SourceInfo {
 }
 
 impl SourceInfo {
-    /// One-line summary like `CSV · delimiter ';' · windows-1251`.
+    /// Сводка в одну строку вида `CSV · delimiter ';' · windows-1251`.
     pub fn summary(&self) -> String {
         match &self.kind {
             SourceKind::DelimitedText { delimiter } => {
@@ -185,66 +185,67 @@ impl SourceInfo {
     }
 }
 
-/// One column of a previewed table: its name and its inferred Polars data type
-/// rendered as a string (e.g. `"Int64"`).
+/// Одна колонка предпросматриваемой таблицы: её имя и выведенный движком Polars
+/// тип данных в виде строки (например `"Int64"`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnInfo {
-    /// Column header as it appears in the file.
+    /// Заголовок колонки, как он есть в файле.
     pub name: String,
-    /// String rendering of the Polars [`DataType`] inferred for this column.
+    /// Строковое представление [`DataType`] Polars, выведенного для этой колонки.
     pub dtype: String,
 }
 
-/// A "head" preview of a source file plus provenance ([`Preview::source`]).
+/// Предпросмотр «головы» файла-источника плюс происхождение ([`Preview::source`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Preview {
-    /// Columns in file order, with inferred dtypes.
+    /// Колонки в порядке файла, с выведенными dtype.
     pub columns: Vec<ColumnInfo>,
-    /// Up to `max_rows` rows, in file order; each cell is a string.
+    /// До `max_rows` строк в порядке файла; каждая ячейка — строка.
     pub rows: Vec<Vec<String>>,
-    /// What the file turned out to be (format, encoding).
+    /// Чем оказался файл (формат, кодировка).
     pub source: SourceInfo,
 }
 
-/// Summary of a finished File → Parquet staging run.
+/// Итог завершённого прогона staging File → Parquet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportReport {
-    /// Total number of data rows written (header excluded).
+    /// Всего записано строк данных (заголовок не считается).
     pub rows: u64,
-    /// Number of columns written.
+    /// Сколько колонок записано.
     pub columns: usize,
-    /// Number of source files ingested (always 1 in M0).
+    /// Сколько исходных файлов прогнано (в M0 всегда 1).
     pub source_files: usize,
-    /// Absolute path of the written Parquet file, as displayed to the user.
+    /// Абсолютный путь записанного Parquet-файла, как он показывается пользователю.
     pub parquet_path: String,
-    /// Provenance facts of the source that was staged.
+    /// Факты о происхождении источника, который был застейджен.
     pub source: SourceInfo,
-    /// How many Parquet parts/partitions were written (1 = plain single file).
+    /// Сколько Parquet-частей/партиций записано (1 = обычный одиночный файл).
     pub partitions: usize,
 }
 
-/// A text encoding the user can force instead of auto-detection.
+/// Кодировка текста, которую пользователь может задать вместо автоопределения.
 ///
-/// Auto-detection (BOM → strict UTF-8 → Cyrillic heuristic) is right in most
-/// cases, but not all — e.g. a windows-1252 file whose bytes happen to look
-/// like windows-1251. This enum lets the user (or, later, a saved project
-/// schema) say "no, read it as …". See [`ReaderOptions`].
+/// Автоопределение (BOM → строгий UTF-8 → кириллическая эвристика) верно в
+/// большинстве случаев, но не во всех — например, файл windows-1252, байты
+/// которого выглядят как windows-1251. Этот enum позволяет пользователю (а
+/// позже — сохранённой схеме проекта) сказать «нет, читай это как …». См.
+/// [`ReaderOptions`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EncodingChoice {
-    /// Standard UTF-8 (a UTF-8 BOM, if present, is still stripped).
+    /// Обычный UTF-8 (UTF-8 BOM, если он есть, всё равно срезается).
     Utf8,
-    /// windows-1251 (Cyrillic).
+    /// windows-1251 (кириллица).
     Windows1251,
-    /// windows-1252 (Western European / Latin-1 superset).
+    /// windows-1252 (западноевропейская / надмножество Latin-1).
     Windows1252,
-    /// UTF-16 little-endian.
+    /// UTF-16 little-endian (младший байт первым).
     Utf16Le,
-    /// UTF-16 big-endian.
+    /// UTF-16 big-endian (старший байт первым).
     Utf16Be,
 }
 
 impl EncodingChoice {
-    /// Human-readable name, reused for the provenance line.
+    /// Человекочитаемое имя, переиспользуется в строке происхождения.
     pub fn label(self) -> &'static str {
         match self {
             EncodingChoice::Utf8 => "UTF-8",
@@ -256,17 +257,17 @@ impl EncodingChoice {
     }
 }
 
-/// Overrides applied when reading a *text* source. Defaults keep the auto
-/// behaviour the raw layer had since M0.1 (`None` = auto-detect).
+/// Переопределения при чтении *текстового* источника. По умолчанию сохраняется
+/// авто-поведение сырого слоя из M0.1 (`None` = автоопределение).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReaderOptions {
-    /// Forced text encoding, or `None` for auto-detection.
+    /// Принудительная кодировка текста или `None` для автоопределения.
     pub encoding: Option<EncodingChoice>,
-    /// Forced field delimiter, or `None` for auto-detection.
+    /// Принудительный разделитель полей или `None` для автоопределения.
     pub delimiter: Option<char>,
-    /// Whether the first row is a header with column names. Default `true`;
-    /// untick for header-less files (Polars then auto-names columns
-    /// `column_0, column_1, …` and treats the first row as data).
+    /// Является ли первая строка заголовком с именами колонок. По умолчанию
+    /// `true`; снимите галочку для файлов без заголовка (тогда Polars сам
+    /// называет колонки `column_0, column_1, …` и считает первую строку данными).
     pub has_header: bool,
 }
 
@@ -281,22 +282,22 @@ impl Default for ReaderOptions {
 }
 
 // ---------------------------------------------------------------------------
-// Public API
+// Публичный API
 // ---------------------------------------------------------------------------
 
-/// Read at most `max_rows` rows of any supported source file ([`SourceKind`]).
+/// Читает не более `max_rows` строк любого поддерживаемого файла ([`SourceKind`]).
 ///
-/// Equivalent to [`preview_source_with`] with default (auto) [`ReaderOptions`].
+/// Эквивалент [`preview_source_with`] с [`ReaderOptions`] по умолчанию (авто).
 ///
 /// # Errors
-/// I/O errors, decode errors (see [`StrataError::Encoding`]) and Polars parse
-/// errors are all reported through [`StrataError`].
+/// Ошибки ввода-вывода, ошибки декодирования (см. [`StrataError::Encoding`]) и
+/// ошибки разбора Polars — всё сообщается через [`StrataError`].
 pub fn preview_source(path: &Path, max_rows: usize) -> Result<Preview> {
     preview_source_with(path, max_rows, ReaderOptions::default())
 }
 
-/// Like [`preview_source`], but honouring manual [`ReaderOptions`] overrides
-/// (encoding / delimiter) for text files.
+/// Как [`preview_source`], но учитывает ручные переопределения [`ReaderOptions`]
+/// (кодировка / разделитель) для текстовых файлов.
 pub fn preview_source_with(
     path: &Path,
     max_rows: usize,
@@ -306,20 +307,20 @@ pub fn preview_source_with(
     Ok(preview_from_frame(&frame, source))
 }
 
-/// Stage any supported source file into a single Parquet file (raw layer).
+/// Стейджит любой поддерживаемый файл в один Parquet-файл (сырой слой).
 ///
-/// Equivalent to [`source_to_parquet_with`] with default (auto)
-/// [`ReaderOptions`]. "Stage" = faithful carry-over: decode/type correctly,
-/// but change no values (see module docs).
+/// Эквивалент [`source_to_parquet_with`] с [`ReaderOptions`] по умолчанию
+/// (авто). «Stage» = достоверный перенос: декодировать/типизировать правильно,
+/// но не менять значения (см. документацию модуля).
 ///
 /// # Errors
-/// Same error surface as [`preview_source`].
+/// Тот же набор ошибок, что и у [`preview_source`].
 pub fn source_to_parquet(path: &Path, parquet_path: &Path) -> Result<ImportReport> {
     source_to_parquet_with(path, parquet_path, ReaderOptions::default())
 }
 
-/// Like [`source_to_parquet`], but honouring manual [`ReaderOptions`]
-/// overrides for text files.
+/// Как [`source_to_parquet`], но учитывает ручные переопределения
+/// [`ReaderOptions`] для текстовых файлов.
 pub fn source_to_parquet_with(
     path: &Path,
     parquet_path: &Path,
@@ -343,16 +344,16 @@ pub fn source_to_parquet_with(
     })
 }
 
-/// Stage one file into a *partitioned* dataset directory.
+/// Стейджит один файл в *партиционированный* каталог датасета.
 ///
-/// Rows are grouped by the distinct values of `partition_column` (a string
-/// column, e.g. `date` = `2026-01-05` or `city` = `Moscow`) and each group is
-/// written under `<dest_root>/<column>=<value>/part-….parquet` — a
-/// Hive-style layout that downstream tools (Polars, DuckDB, …) read natively.
+/// Строки группируются по уникальным значениям `partition_column` (строковая
+/// колонка, например `date` = `2026-01-05` или `city` = `Moscow`), и каждая
+/// группа пишется в `<dest_root>/<column>=<value>/part-….parquet` — раскладка в
+/// стиле Hive, которую нижестоящие инструменты (Polars, DuckDB, …) читают нативно.
 ///
-/// The column must be a Polars `String` column; anything else fails loudly
-/// with [`StrataError::PartitionColumn`] (partitioning needs clean, known
-/// values — a validator/ODS concern, not a raw-stage guess).
+/// Колонка должна быть `String`-колонкой Polars; всё остальное громко падает с
+/// [`StrataError::PartitionColumn`] (партиционированию нужны чистые, известные
+/// значения — это забота валидатора/ODS, а не догадка сырого этапа).
 pub fn source_to_parquet_partitioned(
     path: &Path,
     dest_root: &Path,
@@ -365,7 +366,7 @@ pub fn source_to_parquet_partitioned(
         return Err(StrataError::PartitionColumn(partition_column.to_string()));
     }
 
-    // Distinct values in first-seen order (small; partition keys are low-cardinality).
+    // Уникальные значения в порядке первого появления (их мало; ключи партиций низкокардинальны).
     let mut values: Vec<String> = Vec::new();
     for index in 0..column_series.len() {
         if let Ok(value) = column_series.get(index) {
@@ -386,13 +387,13 @@ pub fn source_to_parquet_partitioned(
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "source".to_string());
 
-    // Capture width before the loop: `DataFrame::lazy()` consumes the frame,
-    // so each iteration works on a cheap clone.
+    // Запоминаем ширину до цикла: `DataFrame::lazy()` потребляет фрейм,
+    // поэтому каждая итерация работает с дешёвой копией.
     let total_columns = frame.width();
     let mut rows_total = 0u64;
     for (index, value) in values.iter().enumerate() {
-        // Hive naming: `<column>=<value>`; sanitize so no path separator/weird
-        // char can escape the partition directory.
+        // Именование Hive: `<column>=<value>`; санитизируем, чтобы разделитель
+        // пути или странный символ не вырвались из директории партиции.
         let dir_name = format!(
             "{}={}",
             sanitize_partition_key(partition_column),
@@ -425,9 +426,9 @@ pub fn source_to_parquet_partitioned(
     })
 }
 
-/// Replace characters that are unsafe in directory/file names with `_`.
-/// This keeps a Hive partition folder (`city=New York` → `city=New_York`)
-/// valid on every OS.
+/// Заменяет символы, небезопасные в именах каталогов/файлов, на `_`.
+/// Так Hive-папка партиции (`city=New York` → `city=New_York`) остаётся
+/// валидной в любой ОС.
 fn sanitize_partition_key(value: &str) -> String {
     let sanitized: String = value
         .chars()
@@ -443,13 +444,14 @@ fn sanitize_partition_key(value: &str) -> String {
     }
 }
 
-/// Open any supported file into a materialized frame plus provenance.
+/// Открывает любой поддерживаемый файл в материализованный фрейм плюс происхождение.
 ///
-/// Central decision point shared by preview and staging so both always agree:
-/// 1. Parquet → native scan (no text decoding);
-/// 2. text → resolve (charset, delimiter) from [`ReaderOptions`] or auto
-///    detection, then read (lazy for pure auto-UTF-8, decode-then-parse
-///    otherwise).
+/// Центральная точка решения, общая для предпросмотра и staging, чтобы они
+/// всегда совпадали:
+/// 1. Parquet → нативный скан (без декодирования текста);
+/// 2. текст → определяем (кодировку, разделитель) из [`ReaderOptions`] или
+///    автоопределением, затем читаем (лениво для чистого авто-UTF-8, иначе
+///    декодируем и разбираем).
 fn open_any(
     path: &Path,
     options: ReaderOptions,
@@ -476,9 +478,9 @@ fn open_any(
     }
 
     let (charset, delimiter) = resolve_text_parameters(&head, options)?;
-    // Lazy streaming is only safe when we did *not* force an encoding: an
-    // explicit choice must be validated strictly (decode the whole file), so
-    // a wrong override fails loudly instead of silently producing mojibake.
+    // Ленивый потоковый разбор безопасен, только когда кодировка *не* задана
+    // принудительно: явный выбор надо валидировать строго (декодировать весь
+    // файл), чтобы неверное переопределение падало громко, а не давало молча моджибейк.
     let stream_if_pure_utf8 = options.encoding.is_none();
     let frame = read_text_frame(
         path,
@@ -495,14 +497,15 @@ fn open_any(
     Ok((frame, source))
 }
 
-/// Decide (charset, delimiter) for a text file: `ReaderOptions` overrides win,
-/// otherwise auto-detection (BOM → strict UTF-8 → Cyrillic heuristic) runs.
+/// Определяет (кодировку, разделитель) для текстового файла: переопределения
+/// `ReaderOptions` выигрывают, иначе работает автоопределение (BOM → строгий
+/// UTF-8 → кириллическая эвристика).
 fn resolve_text_parameters(head: &[u8], options: ReaderOptions) -> Result<(Charset, char)> {
     let charset = match options.encoding {
         Some(choice) => {
             let charset = choice.into_charset();
-            // Even a forced UTF-8 read must strip a UTF-8 BOM, otherwise the
-            // BOM becomes part of the first header name.
+            // Даже принудительное чтение UTF-8 должно срезать UTF-8 BOM,
+            // иначе BOM попадёт в имя первой колонки.
             if charset == Charset::Utf8 && head.starts_with(&[0xEF, 0xBB, 0xBF]) {
                 Charset::Utf8Bom
             } else {
@@ -521,30 +524,30 @@ fn resolve_text_parameters(head: &[u8], options: ReaderOptions) -> Result<(Chars
 }
 
 // ---------------------------------------------------------------------------
-// Backwards-compatible CSV conveniences (used by tests and older callers)
+// CSV-удобства для обратной совместимости (используются тестами и старыми вызовами)
 // ---------------------------------------------------------------------------
 
-/// CSV-only convenience: [`preview_source`] with the sample expectations of M0.
+/// Удобство только для CSV: [`preview_source`] с эталонными ожиданиями M0.
 pub fn preview_csv(path: &Path, max_rows: usize) -> Result<Preview> {
     preview_source(path, max_rows)
 }
 
-/// CSV-only convenience: [`source_to_parquet`].
+/// Удобство только для CSV: [`source_to_parquet`].
 pub fn csv_to_parquet(csv_path: &Path, parquet_path: &Path) -> Result<ImportReport> {
     source_to_parquet(csv_path, parquet_path)
 }
 
 // ---------------------------------------------------------------------------
-// Internals: file probing
+// Внутреннее: разведка файла
 // ---------------------------------------------------------------------------
 
-/// How many leading bytes we read to sniff the format/encoding/delimiter.
+/// Сколько ведущих байт читаем, чтобы определить формат/кодировку/разделитель.
 const HEAD_BYTES: usize = 32 * 1024;
 
-/// Candidate delimiters, in the order we prefer when counts tie.
+/// Кандидаты в разделители, в порядке предпочтения при равенстве счётчиков.
 const DELIMITER_CANDIDATES: [char; 4] = [',', ';', '\t', '|'];
 
-/// Read up to `limit` bytes from the start of `path`.
+/// Читает до `limit` байт с начала `path`.
 fn read_head(path: &Path, limit: usize) -> Result<Vec<u8>> {
     use std::io::Read;
     let mut file = std::fs::File::open(path)?;
@@ -561,15 +564,15 @@ fn read_head(path: &Path, limit: usize) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// How many leading bytes a *preview* reads when the file needs decoding.
-/// Pure UTF-8 previews stream lazily and never buffer the file; non-UTF-8
-/// files must be decoded to UTF-8 first, so we cap that work to a few rows'
-/// worth instead of decoding a multi-GB file to show 50 rows.
+/// Сколько ведущих байт читает *предпросмотр*, когда файл нужно декодировать.
+/// Чистые UTF-8-предпросмотры идут ленивым потоком и не буферизуют файл;
+/// не-UTF-8 файлы сначала декодируются в UTF-8, поэтому мы ограничиваем эту
+/// работу парой строк вместо декодирования многогигабайтного файла ради 50 строк.
 const PREVIEW_DECODE_BUDGET: usize = 4 * 1024 * 1024;
 
-/// Clip a byte prefix to the last complete record (newline), so a truncated
-/// decode never parses a ragged half-line. Falls back to the whole prefix when
-/// there is no newline at all (e.g. a single-line file).
+/// Обрезает префикс байт по последней целой записи (переводу строки), чтобы
+/// усечённое декодирование не разбирало рваную половину строки. Если переводов
+/// строки нет вовсе (например, файл в одну строку), берётся весь префикс.
 fn clip_to_record_boundary(bytes: &[u8]) -> &[u8] {
     if bytes.is_empty() || bytes[bytes.len() - 1] == b'\n' {
         return bytes;
@@ -580,9 +583,9 @@ fn clip_to_record_boundary(bytes: &[u8]) -> &[u8] {
     }
 }
 
-/// A Parquet file is identified by its magic bytes (`PAR1` at offset 0),
-/// with the extension as a fallback hint for truncated reads.
-/// An Excel workbook is detected by extension (XLSX/XLS).
+/// Parquet-файл опознаётся по magic-байтам (`PAR1` по смещению 0),
+/// расширение — запасная подсказка для усечённых чтений.
+/// Книга Excel определяется по расширению (XLSX/XLS).
 fn looks_like_excel(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -598,7 +601,7 @@ fn looks_like_parquet(path: &Path, head: &[u8]) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("parquet"))
 }
 
-/// Encodings the raw layer can read. Auto-detected from a byte prefix.
+/// Кодировки, которые умеет читать сырой слой. Определяются по префиксу байт.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Charset {
     Utf8,
@@ -610,7 +613,7 @@ enum Charset {
 }
 
 impl Charset {
-    /// Human-readable name shown in the UI.
+    /// Человекочитаемое имя для показа в UI.
     fn label(self) -> &'static str {
         match self {
             Charset::Utf8 => "UTF-8",
@@ -624,7 +627,7 @@ impl Charset {
 }
 
 impl EncodingChoice {
-    /// Map a public, user-selectable encoding onto the internal decoder set.
+    /// Переводит публичную, выбираемую пользователем кодировку во внутренний набор декодеров.
     fn into_charset(self) -> Charset {
         match self {
             EncodingChoice::Utf8 => Charset::Utf8,
@@ -636,11 +639,11 @@ impl EncodingChoice {
     }
 }
 
-/// Detect the charset of a text file from its leading bytes.
+/// Определяет кодировку текстового файла по его ведущим байтам.
 ///
-/// Priority: byte-order marks (authoritative) → strict UTF-8 → a small
-/// heuristic between windows-1251 and windows-1252 (both map every byte, so
-/// neither ever "errors"; we pick the one that yields more Cyrillic text).
+/// Приоритет: BOM (авторитетный) → строгий UTF-8 → небольшая эвристика между
+/// windows-1251 и windows-1252 (обе отображают любой байт, так что ни одна
+/// никогда не «ошибается»; берём ту, что даёт больше кириллического текста).
 fn detect_charset(prefix: &[u8]) -> Charset {
     if prefix.starts_with(&[0xEF, 0xBB, 0xBF]) {
         return Charset::Utf8Bom;
@@ -672,8 +675,8 @@ fn count_cyrillic(text: &str) -> usize {
         .count()
 }
 
-/// Byte-offset of the BOM for `charset`, when present. Explicit UTF-16 reads
-/// are valid *with or without* a BOM, so we only strip what is actually there.
+/// Байтовое смещение BOM для `charset`, если он есть. Явное чтение UTF-16
+/// валидно *с BOM и без*, поэтому срезаем только то, что реально там есть.
 fn bom_len(charset: Charset, bytes: &[u8]) -> usize {
     match charset {
         Charset::Utf8Bom if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) => 3,
@@ -683,8 +686,8 @@ fn bom_len(charset: Charset, bytes: &[u8]) -> usize {
     }
 }
 
-/// Decode *sampling* bytes (may be truncated mid-character): lossy is fine,
-/// we only use the result to find the first line and the delimiter.
+/// Декодирует *пробные* байты (могут быть обрезаны посреди символа): потери
+/// допустимы, результат нужен только чтобы найти первую строку и разделитель.
 fn decode_sample(bytes: &[u8], charset: Charset) -> Result<String> {
     let body = &bytes[bom_len(charset, bytes)..];
     match charset {
@@ -696,9 +699,9 @@ fn decode_sample(bytes: &[u8], charset: Charset) -> Result<String> {
     }
 }
 
-/// Decode a *whole* file strictly. For declared-UTF-8 content a stray invalid
-/// byte becomes a hard error (better than silently inserting U+FFFD into
-/// staging data).
+/// Строго декодирует *весь* файл. Для контента, объявленного UTF-8, случайный
+/// невалидный байт становится жёсткой ошибкой (лучше, чем молча вставить
+/// U+FFFD в staging-данные).
 fn decode_bytes(bytes: &[u8], charset: Charset) -> Result<String> {
     let body = &bytes[bom_len(charset, bytes)..];
     match charset {
@@ -711,15 +714,15 @@ fn decode_bytes(bytes: &[u8], charset: Charset) -> Result<String> {
     }
 }
 
-/// First physical line of the decoded sample (empty string if none yet).
+/// Первая физическая строка декодированного образца (пустая строка, если её ещё нет).
 fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or("")
 }
 
-/// Detect the field delimiter from the header line, ignoring quoted regions.
+/// Определяет разделитель полей по строке заголовка, игнорируя области в кавычках.
 ///
-/// Returns the candidate with the highest occurrence count, `,` as a default
-/// when nothing matches (a single-column file has no delimiter at all).
+/// Возвращает кандидата с наибольшим числом вхождений, а по умолчанию `,` —
+/// если не совпало ничего (в файле с одной колонкой разделителя просто нет).
 fn detect_delimiter(line: &str) -> char {
     let mut counts = [0usize; DELIMITER_CANDIDATES.len()];
     let mut in_quotes = false;
@@ -750,16 +753,17 @@ fn detect_delimiter(line: &str) -> char {
 }
 
 // ---------------------------------------------------------------------------
-// Internals: reading into DataFrames
+// Внутреннее: чтение в DataFrame
 // ---------------------------------------------------------------------------
 
-/// Read a delimited text file into a frame, choosing the right path:
-/// * pure auto-detected UTF-8 → lazy stream straight from the file (scalable);
-/// * anything else (incl. every *forced* encoding) → decode the whole file
-///   into UTF-8 first, then parse from memory. Forced encodings are validated
-///   strictly on purpose: a wrong override must fail loudly, not mojibake.
+/// Читает текстовый файл с разделителями во фрейм, выбирая правильный путь:
+/// * чистый автоопределённый UTF-8 → ленивый поток прямо из файла (масштабируемо);
+/// * всё остальное (включая любую *принудительную* кодировку) → сначала
+///   декодируем весь файл в UTF-8, затем разбираем из памяти. Принудительные
+///   кодировки валидируются строго намеренно: неверное переопределение должно
+///   падать громко, а не давать моджибейк.
 ///
-/// `max_rows: None` reads everything (staging); `Some(n)` reads a preview.
+/// `max_rows: None` читает всё (staging); `Some(n)` читает предпросмотр.
 fn read_text_frame(
     path: &Path,
     charset: Charset,
@@ -771,26 +775,26 @@ fn read_text_frame(
     if charset == Charset::Utf8 && stream_if_pure_utf8 {
         read_text_lazy(path, delimiter, has_header, max_rows)
     } else if let Some(rows) = max_rows {
-        // Preview of a non-UTF-8 file: decode only a bounded prefix (clipped
-        // to a whole record) instead of the entire file — the memory/CPU win
-        // that keeps a 2 GB cp1251 export cheap to peek at.
+        // Предпросмотр не-UTF-8 файла: декодируем только ограниченный префикс
+        // (обрезанный по целой записи), а не весь файл — та самая экономия
+        // памяти и CPU, что делает дешёвым взгляд на экспорт cp1251 в 2 ГБ.
         let bytes = read_head(path, PREVIEW_DECODE_BUDGET)?;
         let bytes = clip_to_record_boundary(&bytes).to_vec();
         let text = decode_bytes(&bytes, charset)?;
         read_text_from_buffer(text, delimiter, has_header, Some(rows))
     } else {
-        // Full staging read: whole file, decoded strictly.
+        // Полное staging-чтение: весь файл, строго декодированный.
         let bytes = std::fs::read(path)?;
         let text = decode_bytes(&bytes, charset)?;
         read_text_from_buffer(text, delimiter, has_header, None)
     }
 }
 
-/// Stream a pure-UTF-8 delimited file through the lazy engine.
+/// Проводит чисто UTF-8 файл с разделителями через ленивый движок.
 ///
-/// `max_rows: None` means "read everything" (used by staging); `Some(n)`
-/// limits the parse (used by previews) so we never read a huge file fully
-/// just to show 50 rows.
+/// `max_rows: None` означает «читать всё» (использует staging); `Some(n)`
+/// ограничивает разбор (используют предпросмотры), чтобы мы никогда не читали
+/// огромный файл целиком ради показа 50 строк.
 fn read_text_lazy(
     path: &Path,
     delimiter: char,
@@ -805,11 +809,12 @@ fn read_text_lazy(
     Ok(lazy.collect()?)
 }
 
-/// Parse already-decoded UTF-8 text from an in-memory buffer (eager).
+/// Разбирает уже декодированный UTF-8-текст из буфера в памяти (жадно).
 ///
-/// Used when the file needed transcoding; Polars can only parse UTF-8, so we
-/// hand it a `Cursor` over the decoded bytes. M0.1 reads whole files here;
-/// chunked streaming for very large non-UTF-8 files is a later milestone.
+/// Используется, когда файл нужно было перекодировать; Polars умеет разбирать
+/// только UTF-8, поэтому мы отдаём ему `Cursor` над декодированными байтами.
+/// В M0.1 здесь читаются файлы целиком; потоковая обработка кусками для очень
+/// больших не-UTF-8 файлов — отдельный милестон.
 fn read_text_from_buffer(
     text: String,
     delimiter: char,
@@ -824,8 +829,8 @@ fn read_text_from_buffer(
     Ok(reader.finish()?)
 }
 
-/// Scan the head of a Parquet file (lazy; `limit` lets the engine read only
-/// what it needs for the requested number of rows).
+/// Сканирует голову Parquet-файла (лениво; `limit` позволяет движку прочитать
+/// только то, что нужно для запрошенного числа строк).
 fn scan_parquet_head(path: &Path, max_rows: Option<usize>) -> Result<DataFrame> {
     let lazy = LazyFrame::scan_parquet(to_plref_path(path)?, Default::default())?;
     let limited = match max_rows {
@@ -836,10 +841,10 @@ fn scan_parquet_head(path: &Path, max_rows: Option<usize>) -> Result<DataFrame> 
 }
 
 // ---------------------------------------------------------------------------
-// Internals: output shaping
+// Внутреннее: формирование вывода
 // ---------------------------------------------------------------------------
 
-/// Turn a materialized frame into a [`Preview`] (strings for the UI).
+/// Превращает материализованный фрейм в [`Preview`] (строки для UI).
 fn preview_from_frame(frame: &DataFrame, source: SourceInfo) -> Preview {
     let columns = frame
         .columns()
@@ -856,8 +861,8 @@ fn preview_from_frame(frame: &DataFrame, source: SourceInfo) -> Preview {
         for column in frame.columns() {
             match column.get(row_index) {
                 Ok(value) => row.push(cell_to_string(&value)),
-                // A failed cell read should never happen on a well-formed frame;
-                // we degrade to an empty cell instead of panicking the UI.
+                // Неудачное чтение ячейки не должно случаться на корректном
+                // фрейме; мы отдаём пустую ячейку, а не роняем UI паникой.
                 Err(_) => row.push(String::new()),
             }
         }
@@ -871,12 +876,12 @@ fn preview_from_frame(frame: &DataFrame, source: SourceInfo) -> Preview {
     }
 }
 
-/// Render one cell (`AnyValue`) as the plain text a user expects to see.
+/// Отрисовывает одну ячейку (`AnyValue`) как обычный текст, который ждёт пользователь.
 ///
-/// Most values format fine via `Display`, but Polars renders `String` cells
-/// *with surrounding quotes* (`"Globex"`) because its `Display` mirrors the
-/// debugging convention. A preview table should show `Globex`, so the two
-/// string variants are special-cased here.
+/// Большинство значений нормально форматируется через `Display`, но `String`-
+/// ячейки Polars печатает *в кавычках* (`"Globex"`), потому что его `Display`
+/// повторяет отладочную конвенцию. Таблица предпросмотра должна показывать
+/// `Globex`, поэтому два строковых варианта обрабатываются здесь отдельно.
 fn cell_to_string(value: &AnyValue<'_>) -> String {
     match value {
         AnyValue::String(text) => (*text).to_string(),
@@ -885,11 +890,11 @@ fn cell_to_string(value: &AnyValue<'_>) -> String {
     }
 }
 
-/// Convert a `std::path::Path` into the `PlRefPath` Polars 0.55 uses for scans.
+/// Превращает `std::path::Path` в `PlRefPath`, который Polars 0.55 использует для сканов.
 ///
-/// Polars represents file paths as UTF-8 strings (they also serve cloud
-/// locations such as `s3://...`), so a non-UTF-8 local path is a domain error
-/// rather than something we can silently mangle.
+/// Polars представляет пути к файлам как UTF-8-строки (они же служат облачными
+/// локациями вроде `s3://...`), поэтому не-UTF-8 локальный путь — доменная
+/// ошибка, а не то, что можно молча исковеркать.
 fn to_plref_path(path: &Path) -> Result<PlRefPath> {
     let as_str = path
         .to_str()
@@ -903,7 +908,7 @@ mod tests {
     use std::io::Write;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Unique temp paths: tests run in parallel, so names must never clash.
+    /// Уникальные временные пути: тесты идут параллельно, имена не должны совпадать.
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     fn unique_temp(name: &str) -> PathBuf {
@@ -928,21 +933,21 @@ mod tests {
 3,2026-01-03,240.00,Initech\n";
 
     // ------------------------------------------------------------------
-    // Optimization guards (M-perf)
+    // Стражи оптимизаций (M-perf)
     // ------------------------------------------------------------------
 
     #[test]
     fn clip_to_record_boundary_never_leaves_a_ragged_tail() {
-        // Ends with a newline: unchanged.
+        // Заканчивается переводом строки: без изменений.
         assert_eq!(clip_to_record_boundary(b"a,b\n1,2\n"), b"a,b\n1,2\n");
-        // Ends mid-record: the partial tail is dropped.
+        // Обрыв посреди записи: неполный хвост отбрасывается.
         assert_eq!(clip_to_record_boundary(b"a,b\n1,2\n3,"), b"a,b\n1,2\n");
-        // No newline at all (single line): kept whole.
+        // Переводов строки нет вовсе (одна строка): сохраняется целиком.
         assert_eq!(clip_to_record_boundary(b"only,one,line"), b"only,one,line");
     }
 
     // ------------------------------------------------------------------
-    // M0 basics
+    // Основы M0
     // ------------------------------------------------------------------
 
     #[test]
@@ -958,7 +963,7 @@ mod tests {
         for row in &preview.rows {
             assert_eq!(row.len(), preview.columns.len());
         }
-        // Provenance: it was plain UTF-8 CSV with a comma delimiter.
+        // Происхождение: это был обычный UTF-8 CSV с запятой-разделителем.
         assert_eq!(
             preview.source,
             SourceInfo {
@@ -1010,24 +1015,24 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // M0.1: encodings and delimiters (the "raw layer fidelity" tests)
+    // M0.1: кодировки и разделители (тесты «достоверности сырого слоя»)
     // ------------------------------------------------------------------
 
     #[test]
     fn cp1251_semicolon_file_is_decoded_without_mojibake() {
-        // A classic Russian Excel export: windows-1251 + ';' delimiter.
+        // Классический русский экспорт из Excel: windows-1251 + разделитель ';'.
         let text = "дата;сумма;клиент\n2026-01-05;12.50;ООО Ромашка\n2026-01-06;7.25;ИП Иванов\n";
         let (bytes, _, _) = WINDOWS_1251.encode(text);
         let path = write_temp_bytes(&bytes, "cp1251_semicolon.csv");
 
         let preview = preview_source(&path, 50).expect("cp1251 preview should succeed");
 
-        // No mojibake: headers decoded to real Russian words.
+        // Без моджибейка: заголовки декодировались в настоящие русские слова.
         let names: Vec<&str> = preview.columns.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["дата", "сумма", "клиент"]);
         assert_eq!(preview.rows[0][2], "ООО Ромашка");
 
-        // Provenance reflects what we detected.
+        // Происхождение отражает то, что мы определили.
         assert_eq!(
             preview.source.kind,
             SourceKind::DelimitedText { delimiter: ';' }
@@ -1056,9 +1061,10 @@ mod tests {
 
     #[test]
     fn utf16le_with_bom_is_decoded() {
-        // encoding_rs's UTF-16LE is decode-only (its `encode` returns UTF-8,
-        // per its docs), so we build LE bytes by hand for this test.
-        let mut bytes = vec![0xFF, 0xFE]; // UTF-16 LE BOM
+        // UTF-16LE в encoding_rs только декодирует (его `encode` возвращает
+        // UTF-8, как сказано в документации), поэтому LE-байты для теста
+        // собираем вручную.
+        let mut bytes = vec![0xFF, 0xFE]; // BOM для UTF-16 LE
         for unit in "id,name\n1,Ann\n2,Zoe\n".encode_utf16() {
             bytes.extend_from_slice(&unit.to_le_bytes());
         }
@@ -1075,7 +1081,7 @@ mod tests {
 
     #[test]
     fn parquet_source_can_be_previewed() {
-        // Stage a CSV first, then preview the produced Parquet file.
+        // Сначала стейджим CSV, затем смотрим предпросмотр полученного Parquet-файла.
         let csv = write_temp_text(SAMPLE_CSV, "forparquet.csv");
         let parquet = unique_temp("forparquet.parquet");
         source_to_parquet(&csv, &parquet).expect("staging should succeed");
@@ -1092,7 +1098,7 @@ mod tests {
 
     #[test]
     fn cp1251_roundtrip_keeps_cyrillic_through_parquet() {
-        // The staging promise: no mojibake even after the raw layer.
+        // Обещание staging: никакого моджибейка даже после сырого слоя.
         let text = "дата;название\n2026-01-05;Зима\n2026-01-06;Весна\n";
         let (bytes, _, _) = WINDOWS_1251.encode(text);
         let path = write_temp_bytes(&bytes, "cp1251_roundtrip.csv");
@@ -1111,14 +1117,15 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // M1b: manual ReaderOptions overrides (when auto-detection is wrong)
+    // M1b: ручные переопределения ReaderOptions (когда автоопределение ошибается)
     // ------------------------------------------------------------------
 
     #[test]
     fn encoding_override_fixes_windows1252_misdetection() {
-        // "café" in windows-1252 is bytes ...E9. Auto-detection prefers
-        // windows-1251 here (decoding 0xE9 as 1251 yields Cyrillic 'й',
-        // which wins the Cyrillic heuristic). Forcing 1252 must read 'é'.
+        // "café" в windows-1252 — это байты ...E9. Автоопределение предпочитает
+        // здесь windows-1251 (декодирование 0xE9 как 1251 даёт кириллическую
+        // 'й', которая выигрывает кириллическую эвристику). Принудительный 1252
+        // обязан прочитать 'é'.
         let text = "café;prix\n1;2\n3;4\n";
         let (bytes, _, _) = encoding_rs::WINDOWS_1252.encode(text);
         let path = write_temp_bytes(&bytes, "cp1252.csv");
@@ -1132,7 +1139,7 @@ mod tests {
         assert_eq!(forced.columns[0].name, "café");
         assert_eq!(forced.source.encoding, "windows-1252");
 
-        // Staging honours the same override.
+        // Staging уважает то же переопределение.
         let parquet = unique_temp("cp1252.parquet");
         let report = source_to_parquet_with(&path, &parquet, options).expect("forced 1252 stage");
         assert_eq!(report.source.encoding, "windows-1252");
@@ -1144,8 +1151,9 @@ mod tests {
 
     #[test]
     fn delimiter_override_changes_parsing() {
-        // Auto-detection finds '|'; forcing ',' must split nothing and yield
-        // one wide column — proving the override is really applied.
+        // Автоопределение находит '|'; принудительная ',' не должна ничего
+        // разделить и даёт одну широкую колонку — доказательство, что
+        // переопределение правда применено.
         let path = write_temp_text("a|b|c\n1|2|3\n", "pipes.txt");
         let auto = preview_source(&path, 5).expect("auto preview");
         assert_eq!(auto.columns.len(), 3);
@@ -1168,7 +1176,7 @@ mod tests {
 
     #[test]
     fn forced_utf8_on_cp1251_file_fails_loudly() {
-        // A wrong explicit override must error, not silently corrupt.
+        // Неверное явное переопределение должно дать ошибку, а не молча испортить данные.
         let text = "дата;сумма\n2026-01-05;1.5\n";
         let (bytes, _, _) = WINDOWS_1251.encode(text);
         let path = write_temp_bytes(&bytes, "cp1251_forbidden_utf8.csv");

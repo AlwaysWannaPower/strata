@@ -1,26 +1,28 @@
-//! # `strata_core::api` — the stable application API of the engine
+//! # `strata_core::api` — стабильный прикладной API движка
 //!
-//! Everything above the engine (today: the axum web service; yesterday: the
-//! Dioxus desktop app) talks to **this module only**. It is a deliberate
-//! façade: plain Rust types in, plain Rust types out, one error type, no
-//! Polars/Arrow types and no file-system handles leaking upward.
+//! Всё, что выше движка (сегодня — веб-сервис на axum; вчера — десктоп на
+//! Dioxus), общается **только с этим модулем**. Это намеренный фасад: на входе
+//! и выходе простые Rust-типы, один тип ошибки, а типы Polars/Arrow и файловые
+//! дескрипторы наверх не протекают.
 //!
 //! ```text
-//!  axum handlers (strata-web)  ──►  strata_core::api  ──►  engine internals
-//!  (or any future frontend)         (this module)         (polars, fs, toml)
+//!  axum handlers (strata-web)  ──►  strata_core::api  ──►  внутренности движка
+//!  (или любой будущий фронтенд)     (этот модуль)         (polars, fs, toml)
 //! ```
 //!
-//! Why it exists:
-//! * **Replaceable frontends.** Dioxus is gone; if axum+htmx is replaced by
-//!   something else later, only this surface has to stay stable.
-//! * **One place for policy.** Source-root allowlisting, workspace naming,
-//!   schema-file naming and ETL error semantics live here, not in handlers.
-//! * **Testability without HTTP.** Everything below is a pure function of
-//!   paths; the web layer is a thin adapter over it.
+//! Зачем он нужен:
+//! * **Заменяемые фронтенды.** Dioxus-десктоп удалён, см. `docs/archive`; если
+//!   axum+htmx однажды заменят на что-то другое, стабильным должен остаться
+//!   только этот фасад.
+//! * **Одно место для политики.** Allowlist корневых источников, именование
+//!   воркспейсов, именование файлов схем и семантика ошибок ETL живут здесь,
+//!   а не в хендлерах.
+//! * **Тестируемость без HTTP.** Всё, что ниже, — чистая функция от путей;
+//!   веб-слой — лишь тонкий адаптер над этим.
 //!
-//! Naming policy in one sentence: an *entity* has a folder (uploads/source
-//! dir) and a schema file `schemas/<entity>.schema.toml`; the entity's staged
-//! Parquet parts live in `<workspace>/data/<entity>/`.
+//! Правило именования в одном предложении: у *сущности* есть папка
+//! (uploads/каталог-источник) и файл схемы `schemas/<entity>.schema.toml`;
+//! застейдженные Parquet-части сущности лежат в `<workspace>/data/<entity>/`.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -32,27 +34,27 @@ use crate::{
 };
 
 // ---------------------------------------------------------------------------
-// Error type: one flat, displayable error for callers
+// Тип ошибки: одна плоская, отображаемая ошибка для вызывающих
 // ---------------------------------------------------------------------------
 
-/// Every failure the application API can report.
+/// Любая ошибка, которую может сообщить прикладной API.
 ///
-/// It is intentionally *stringly* inside: frontends only ever show the message
-/// or map it to a status code, and the engine's rich error types stay private.
+/// Внутри он намеренно *строковый*: фронтенды только показывают сообщение или
+/// превращают его в код статуса, а богатые типы ошибок движка остаются приватными.
 #[derive(Debug, Clone)]
 pub struct ApiError {
     message: String,
 }
 
 impl ApiError {
-    /// Build an error from anything displayable.
+    /// Собирает ошибку из чего угодно, что умеет отображаться.
     pub fn new(message: impl Into<String>) -> Self {
         ApiError {
             message: message.into(),
         }
     }
 
-    /// The human-readable reason (safe to show in a UI).
+    /// Человекочитаемая причина (безопасно показывать в UI).
     pub fn message(&self) -> &str {
         &self.message
     }
@@ -66,77 +68,77 @@ impl fmt::Display for ApiError {
 
 impl std::error::Error for ApiError {}
 
-/// Shorthand used by every function of this module.
+/// Сокращение, используемое каждой функцией этого модуля.
 pub type ApiResult<T> = Result<T, ApiError>;
 
-/// Convert any engine error into an [`ApiError`].
+/// Превращает любую ошибку движка в [`ApiError`].
 fn err(context: &str, error: impl fmt::Display) -> ApiError {
     ApiError::new(format!("{context}: {error}"))
 }
 
 // ---------------------------------------------------------------------------
-// DTOs (data transfer objects) — what frontends actually render
+// DTO (data transfer objects) — то, что фронтенды реально отрисовывают
 // ---------------------------------------------------------------------------
 
-/// A workspace as the UI needs it.
+/// Воркспейс в том виде, в каком он нужен UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceInfo {
-    /// Directory that holds `workspace.toml`, `schemas/`, `data/`.
+    /// Директория, где лежат `workspace.toml`, `schemas/`, `data/`.
     pub dir: PathBuf,
-    /// Human name from the config.
+    /// Человеческое имя из конфига.
     pub name: String,
-    /// Absolute data directory where staged Parquet parts are written.
+    /// Абсолютная директория data, куда пишутся застейдженные Parquet-части.
     pub data_dir: PathBuf,
 }
 
-/// A folder→entity binding, with a convenience flag for the UI.
+/// Привязка папка→сущность, с удобным флагом для UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntityInfo {
-    /// Entity (logical table) name.
+    /// Имя сущности (логической таблицы).
     pub entity: String,
-    /// Bound source folder.
+    /// Привязанная папка-источник.
     pub folder: PathBuf,
-    /// `true` when the confirmed schema file exists on disk.
+    /// `true`, когда подтверждённый файл схемы есть на диске.
     pub has_schema: bool,
 }
 
-/// A candidate entity discovered inside a scan root (mode B).
+/// Сущность-кандидат, найденная внутри scan root (режим B).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CandidateInfo {
-    /// Suggested entity name (folder name).
+    /// Предлагаемое имя сущности (имя папки).
     pub entity: String,
-    /// Candidate folder path.
+    /// Путь папки-кандидата.
     pub folder: PathBuf,
-    /// Files successfully inspected.
+    /// Сколько файлов успешно просмотрено.
     pub files: usize,
-    /// Number of columns in the proposed schema.
+    /// Сколько колонок в предложенной схеме.
     pub columns: usize,
-    /// Number of type conflicts found across files.
+    /// Сколько конфликтов типов найдено между файлами.
     pub conflicts: usize,
 }
 
-/// Outcome of staging one entity.
+/// Итог staging одной сущности.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StageOutcome {
-    /// Files staged into parts.
+    /// Сколько файлов застейджено в части.
     pub staged_files: usize,
-    /// Total data rows written.
+    /// Всего записано строк данных.
     pub rows: u64,
-    /// Files rejected (schema mismatch, unreadable, …).
+    /// Сколько файлов отклонено (несоответствие схеме, нечитаемые, …).
     pub skipped_files: usize,
-    /// Reason strings for skipped files (for the report panel).
+    /// Причины по пропущенным файлам (для панели отчёта).
     pub skipped_reasons: Vec<String>,
-    /// Number of Parquet part files now present in the dataset dir.
+    /// Сколько файлов-частей Parquet сейчас лежит в директории датасета.
     pub parts: usize,
-    /// Dataset directory.
+    /// Директория датасета.
     pub dataset_dir: PathBuf,
 }
 
 // ---------------------------------------------------------------------------
-// Workspaces
+// Воркспейсы
 // ---------------------------------------------------------------------------
 
-/// List workspaces inside `root` (directories containing `workspace.toml`).
+/// Перечисляет воркспейсы внутри `root` (директории с `workspace.toml`).
 pub fn list_workspaces(root: &Path) -> ApiResult<Vec<WorkspaceInfo>> {
     let entries = std::fs::read_dir(root).map_err(|e| err("cannot read workspace root", e))?;
     let mut found = Vec::new();
@@ -157,10 +159,11 @@ pub fn list_workspaces(root: &Path) -> ApiResult<Vec<WorkspaceInfo>> {
     Ok(found)
 }
 
-/// Create a workspace named `name` under `root`, returning its info.
+/// Создаёт воркспейс с именем `name` под `root` и возвращает его описание.
 ///
-/// The directory name is a slug of `name`; if that directory is taken, a
-/// numeric suffix is appended (`sales-2026-2`, …) so create never overwrites.
+/// Имя директории — это slug из `name`; если такая директория занята, к ней
+/// добавляется числовой суффикс (`sales-2026-2`, …), чтобы создание никогда не
+/// перезаписывало существующее.
 pub fn create_workspace_in(root: &Path, name: &str) -> ApiResult<WorkspaceInfo> {
     let name = name.trim();
     if name.is_empty() {
@@ -184,7 +187,7 @@ pub fn create_workspace_in(root: &Path, name: &str) -> ApiResult<WorkspaceInfo> 
     })
 }
 
-/// Load a workspace by its directory (used by every other call).
+/// Загружает воркспейс по его директории (используется всеми остальными вызовами).
 pub fn open_workspace_at(dir: &Path) -> ApiResult<WorkspaceInfo> {
     match open_workspace(dir).map_err(|e| err("cannot read workspace.toml", e))? {
         Some(config) => Ok(WorkspaceInfo {
@@ -200,19 +203,19 @@ pub fn open_workspace_at(dir: &Path) -> ApiResult<WorkspaceInfo> {
 }
 
 // ---------------------------------------------------------------------------
-// Entities: scan roots, confirmation, listing
+// Сущности: scan roots, подтверждение, листинг
 // ---------------------------------------------------------------------------
 
-/// Inspect the **direct subfolders** of `root` as candidate entities.
+/// Смотрит на **прямые подпапки** `root` как на сущности-кандидаты.
 ///
-/// Read-only: nothing is written to the workspace (the "propose, then confirm"
-/// rule). Each candidate carries a light summary for the UI card.
+/// Только чтение: в воркспейс ничего не пишется (правило «сначала предложить,
+/// потом подтвердить»). Каждый кандидат несёт краткую сводку для карточки в UI.
 pub fn scan_candidates(root: &Path) -> ApiResult<Vec<CandidateInfo>> {
     let folders = list_entity_candidates(root).map_err(|e| err("cannot scan root", e))?;
     let mut candidates = Vec::with_capacity(folders.len());
     for folder in folders {
-        // A folder with no readable files is still shown (with zeros) so the
-        // user sees "this folder is empty/wrong" instead of silence.
+        // Папка без читаемых файлов всё равно показывается (с нулями), чтобы
+        // пользователь увидел «папка пуста или не та», а не тишину.
         let report = schema_from_folder(&folder, ReaderOptions::default());
         let (files, columns, conflicts) = match report {
             Ok(report) => (
@@ -233,11 +236,12 @@ pub fn scan_candidates(root: &Path) -> ApiResult<Vec<CandidateInfo>> {
     Ok(candidates)
 }
 
-/// Confirm a candidate: infer the schema, save `schemas/<entity>.toml` and bind
-/// the folder to the entity in `workspace.toml`.
+/// Подтверждает кандидата: выводит схему, сохраняет `schemas/<entity>.toml` и
+/// привязывает папку к сущности в `workspace.toml`.
 ///
-/// This is the only place that *writes* a schema, and it is always an explicit
-/// user action (see the project rule "propose, then confirm").
+/// Это единственное место, которое *записывает* схему, и это всегда явное
+/// действие пользователя (см. правило проекта «сначала предложить, потом
+/// подтвердить»).
 pub fn confirm_entity(workspace_dir: &Path, entity: &str, folder: &Path) -> ApiResult<()> {
     let entity = validate_entity_name(entity)?;
 
@@ -259,8 +263,9 @@ pub fn confirm_entity(workspace_dir: &Path, entity: &str, folder: &Path) -> ApiR
         .collect();
     let schema = SchemaFile::new(folder.to_path_buf(), ReaderOptions::default(), columns);
 
-    // The engine names schema files after the *source*, so save then rename to
-    // the entity name: binding lookup must be predictable (`<entity>.toml`).
+    // Движок называет файлы схем по *источнику*, поэтому сохраняем, а затем
+    // переименовываем в имя сущности: поиск привязки должен быть предсказуемым
+    // (`<entity>.toml`).
     let saved = save_schema(workspace_dir, &schema).map_err(|e| err("cannot save schema", e))?;
     let wanted = format!("{entity}.toml");
     if saved != wanted {
@@ -280,7 +285,7 @@ pub fn confirm_entity(workspace_dir: &Path, entity: &str, folder: &Path) -> ApiR
     Ok(())
 }
 
-/// Entities currently bound in the workspace, with schema presence.
+/// Сущности, привязанные в воркспейсе сейчас, с признаком наличия схемы.
 pub fn entities(workspace_dir: &Path) -> ApiResult<Vec<EntityInfo>> {
     let config = load_config(workspace_dir)?;
     let schemas: Vec<String> =
@@ -296,7 +301,7 @@ pub fn entities(workspace_dir: &Path) -> ApiResult<Vec<EntityInfo>> {
         .collect())
 }
 
-/// Files found in an entity folder (listing for the detail view).
+/// Файлы, найденные в папке сущности (листинг для детального вида).
 pub fn entity_files(workspace_dir: &Path, entity: &str) -> ApiResult<Vec<(String, u64, String)>> {
     let config = load_config(workspace_dir)?;
     let binding = config
@@ -316,18 +321,18 @@ pub fn entity_files(workspace_dir: &Path, entity: &str) -> ApiResult<Vec<(String
 // Staging
 // ---------------------------------------------------------------------------
 
-/// Stage an entity **under its confirmed schema** (schema-validated staging).
+/// Стейджит сущность **по её подтверждённой схеме** (staging с валидацией схемы).
 ///
-/// When a schema file exists, non-conforming files are rejected with reasons
-/// (never silently staged). Without a schema we fall back to plain raw staging
-/// so a user can still get Parquet out of a folder.
+/// Если файл схемы есть, несоответствующие файлы отклоняются с причинами
+/// (никогда не стейджатся молча). Без схемы мы откатываемся к обычному сырому
+/// staging, чтобы пользователь всё равно получил Parquet из папки.
 pub fn stage_entity(workspace_dir: &Path, entity: &str) -> ApiResult<StageOutcome> {
     stage_entity_with_progress(workspace_dir, entity, |_, _| {})
 }
 
-/// Same as [`stage_entity`], but reports `(done_files, total_files)` while it
-/// runs. Callers that must stay responsive (the web service) run this on a
-/// background thread and stream the progress to the browser.
+/// То же, что [`stage_entity`], но сообщает `(done_files, total_files)` по ходу
+/// работы. Вызывающие, которые должны оставаться отзывчивыми (веб-сервис),
+/// запускают это в фоновом потоке и стримят прогресс в браузер.
 pub fn stage_entity_with_progress<F>(
     workspace_dir: &Path,
     entity: &str,
@@ -351,7 +356,7 @@ where
             crate::stage_folder_with_schema_progress(&folder, &dest, &schema, &mut on_progress)
                 .map_err(|e| err("staging failed", e))?
         }
-        // No schema confirmed yet: plain raw staging (no per-file callback).
+        // Схема ещё не подтверждена: обычный сырой staging (без колбэка на файл).
         Err(_) => folder_to_parquet(&folder, &dest).map_err(|e| err("staging failed", e))?,
     };
 
@@ -371,17 +376,17 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Internals
+// Внутреннее
 // ---------------------------------------------------------------------------
 
-/// Read the workspace config (used by several use cases).
+/// Читает конфиг воркспейса (используется несколькими сценариями).
 fn load_config(workspace_dir: &Path) -> ApiResult<WorkspaceConfig> {
     open_workspace(workspace_dir)
         .map_err(|e| err("cannot read workspace.toml", e))?
         .ok_or_else(|| ApiError::new("workspace.toml is missing"))
 }
 
-/// Entity names end up as file names — reject anything path-like.
+/// Имена сущностей становятся именами файлов — всё похожее на путь отвергаем.
 fn validate_entity_name(entity: &str) -> ApiResult<&str> {
     let trimmed = entity.trim();
     let ok = !trimmed.is_empty()
@@ -398,7 +403,7 @@ fn validate_entity_name(entity: &str) -> ApiResult<&str> {
     }
 }
 
-/// Turn a workspace name into a filesystem-safe slug.
+/// Превращает имя воркспейса в безопасный для файловой системы slug.
 fn slugify(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let mut last_dash = false;
@@ -454,7 +459,7 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].dir, ws.dir);
 
-        // Same name again → a suffixed directory, never an overwrite.
+        // То же имя ещё раз → директория с суффиксом, никогда не перезапись.
         let second = create_workspace_in(&root, "Продажи 2026").expect("create 2");
         assert_ne!(second.dir, ws.dir);
         assert_eq!(list_workspaces(&root).expect("list").len(), 2);
@@ -467,7 +472,7 @@ mod tests {
         let root = temp_dir("flow");
         let ws = create_workspace_in(&root, "demo").expect("create ws");
 
-        // A source root with one entity folder holding two conforming files.
+        // Корень-источник с одной папкой сущности и двумя подходящими файлами.
         let sources = temp_dir("sources");
         let sales = sources.join("sales");
         std::fs::create_dir_all(&sales).expect("mkdir sales");
@@ -477,7 +482,7 @@ mod tests {
         );
         write_csv(&sales.join("b.csv"), "id,amount,name\n3,9.0,Gamma\n");
 
-        // Mode B scan sees the candidate but writes nothing.
+        // Скан в режиме B видит кандидата, но ничего не пишет.
         let candidates = scan_candidates(&sources).expect("scan");
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].entity, "sales");
@@ -485,14 +490,14 @@ mod tests {
         assert_eq!(candidates[0].columns, 3);
         assert!(entities(&ws.dir).expect("entities").is_empty());
 
-        // Confirm → schema file + binding.
+        // Подтверждение → файл схемы + привязка.
         confirm_entity(&ws.dir, "sales", &sales).expect("confirm");
         let bound = entities(&ws.dir).expect("entities");
         assert_eq!(bound.len(), 1);
         assert!(bound[0].has_schema);
         assert!(ws.dir.join("schemas/sales.toml").exists());
 
-        // Stage → parts in data/sales, rows counted.
+        // Staging → части в data/sales, строки посчитаны.
         let outcome = stage_entity(&ws.dir, "sales").expect("stage");
         assert_eq!(outcome.staged_files, 2);
         assert_eq!(outcome.rows, 3);
@@ -500,7 +505,7 @@ mod tests {
         assert_eq!(outcome.parts, 2);
         assert!(outcome.dataset_dir.ends_with("data/sales"));
 
-        // Files listing for the detail view.
+        // Листинг файлов для детального вида.
         let files = entity_files(&ws.dir, "sales").expect("files");
         assert_eq!(files.len(), 2);
 
@@ -519,8 +524,8 @@ mod tests {
         write_csv(&clients.join("bad.csv"), "id,email\n2,not-an-email\n");
 
         confirm_entity(&ws.dir, "clients", &clients).expect("confirm");
-        // Same column types here, so the run stages both; the point of this
-        // test is the *shape* of the report (skipped_reasons always present).
+        // Типы колонок тут совпадают, поэтому прогон стейджит оба файла; суть
+        // теста — *форма* отчёта (skipped_reasons присутствует всегда).
         let outcome = stage_entity(&ws.dir, "clients").expect("stage");
         assert_eq!(outcome.staged_files, 2);
         assert!(outcome.skipped_reasons.is_empty());
