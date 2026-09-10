@@ -48,7 +48,7 @@ pub use folder::{
 pub mod schema;
 pub use schema::{
     FolderSchema, SchemaColumn, SchemaConflict, SchemaProposal, schema_from_file,
-    schema_from_folder, stage_folder_with_schema,
+    schema_from_folder, source_to_parquet_typed, stage_folder_with_schema,
 };
 
 /// Project persistence: `project.toml`, saved schemas, token helpers.
@@ -110,6 +110,10 @@ pub enum StrataError {
     /// Project/schema TOML could not be serialized or parsed.
     #[error("project file error: {0}")]
     ProjectFile(String),
+
+    /// A schema asks for a column type the engine does not know how to build.
+    #[error("unsupported schema type: {0}")]
+    SchemaType(String),
 }
 
 /// Convenience alias used by every public function of this crate.

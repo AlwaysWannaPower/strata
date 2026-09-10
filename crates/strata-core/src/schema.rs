@@ -17,12 +17,12 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use polars::prelude::LazyFrame;
+use polars::prelude::{DataType, LazyFrame, ParquetWriter};
 
 use crate::folder::{FileMeta, FolderReport, scan_folder};
 use crate::{
     ColumnDef, ReaderOptions, SchemaFile, delimiter_from_token, encoding_from_token,
-    preview_source_with, source_to_parquet_with,
+    preview_source_with,
 };
 
 /// How many rows of each file we read to infer types. Types are inferred from
@@ -257,7 +257,7 @@ pub fn stage_folder_with_schema(
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| format!("file{index}"));
         let part_path = dest_dir.join(format!("{index:04}-{stem}.parquet"));
-        match source_to_parquet_with(&source_path, &part_path, options) {
+        match source_to_parquet_typed(&source_path, &part_path, options, &schema.columns) {
             Ok(report) => {
                 // Full-file type check: inference over the *whole* file can
                 // differ from the sample (a late bad row turns a column into
@@ -335,6 +335,111 @@ fn verify_part_types(part: &Path, expected: &[ColumnDef]) -> crate::Result<Optio
     Ok(None)
 }
 
+/// Map a schema type label (as stored in `*.schema.toml`) to a Polars dtype.
+///
+/// The set is intentionally small: these are the types the raw layer can
+/// produce and cast between. An unknown label is an error, not a guess.
+fn dtype_from_label(label: &str) -> Option<DataType> {
+    Some(match label {
+        "i8" => DataType::Int8,
+        "i16" => DataType::Int16,
+        "i32" => DataType::Int32,
+        "i64" => DataType::Int64,
+        "u8" => DataType::UInt8,
+        "u16" => DataType::UInt16,
+        "u32" => DataType::UInt32,
+        "u64" => DataType::UInt64,
+        "f32" => DataType::Float32,
+        "f64" => DataType::Float64,
+        "bool" => DataType::Boolean,
+        "str" => DataType::String,
+        _ => return None,
+    })
+}
+
+/// Are two type labels *compatible* for the "one folder = one schema" rule?
+///
+/// Compatibility is wider than equality, but only where widening is lossless
+/// and obvious — the raw layer never guesses:
+///
+/// * identical types are compatible;
+/// * any integer width may widen to a wider integer (`i32` → `i64`);
+/// * any integer may widen to a float (`i64` → `f64`) — the classic case of a
+///   column that looks integral in one file and fractional in another;
+/// * `f32` may widen to `f64`.
+///
+/// Everything else (string ↔ number, date ↔ string, …) is a *conversion*, not a
+/// widening, and belongs to the validation/ODS layer — so it stays a mismatch.
+fn types_compatible(expected: &str, actual: &str) -> bool {
+    if expected == actual {
+        return true;
+    }
+    let expected_rank = numeric_rank(expected);
+    let actual_rank = numeric_rank(actual);
+    match (expected_rank, actual_rank) {
+        // int -> int (widen), int -> float, float -> float (f32 -> f64)
+        (Some(want), Some(have)) => want >= have,
+        _ => false,
+    }
+}
+
+/// Numeric ordering used for widening checks: ints 1..4, floats 5..6.
+/// `None` for non-numeric labels.
+fn numeric_rank(label: &str) -> Option<u8> {
+    Some(match label {
+        "i8" | "u8" => 1,
+        "i16" | "u16" => 2,
+        "i32" | "u32" => 3,
+        "i64" | "u64" => 4,
+        "f32" => 5,
+        "f64" => 6,
+        _ => return None,
+    })
+}
+
+/// Stage a file into a Parquet part **cast to the confirmed schema types**.
+///
+/// Reads the whole file with the schema's reader options, casts any column
+/// whose type is merely *compatible* (widening, see [`types_compatible`]) to
+/// the declared type, then writes the part. Incompatible types never reach
+/// this function — they are rejected earlier with a readable reason.
+pub fn source_to_parquet_typed(
+    path: &Path,
+    part_path: &Path,
+    options: ReaderOptions,
+    columns: &[ColumnDef],
+) -> crate::Result<crate::ImportReport> {
+    let (mut frame, source) = crate::open_any(path, options, None)?;
+
+    for column in columns {
+        let name = column.name.as_str();
+        let expected = dtype_from_label(&column.dtype).ok_or_else(|| {
+            crate::StrataError::SchemaType(format!("{} (column '{}')", column.dtype, column.name))
+        })?;
+        let actual_column = frame.column(name)?;
+        if actual_column.dtype() != &expected {
+            let casted = actual_column.cast(&expected)?;
+            frame.with_column(casted)?;
+        }
+    }
+
+    let rows = frame.height();
+    let column_count = frame.width();
+
+    let mut file = std::fs::File::create(part_path)?;
+    let writer = ParquetWriter::new(&mut file);
+    writer.finish(&mut frame.into())?;
+
+    Ok(crate::ImportReport {
+        rows: rows as u64,
+        columns: column_count,
+        source_files: 1,
+        parquet_path: part_path.display().to_string(),
+        source,
+        partitions: 1,
+    })
+}
+
 /// Compare the confirmed schema columns with what a file actually exposes.
 ///
 /// Returns a human reason for the first mismatch (order, name or type), or
@@ -354,7 +459,7 @@ fn schema_mismatch(expected: &[ColumnDef], actual: &[SchemaColumn]) -> Option<St
                 expected.name, actual.name
             ));
         }
-        if expected.dtype != actual.dtype {
+        if !types_compatible(&expected.dtype, &actual.dtype) {
             return Some(format!(
                 "'{}': expected type {}, found {}",
                 expected.name, expected.dtype, actual.dtype
@@ -596,6 +701,61 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(dest);
+    }
+
+    #[test]
+    fn numeric_widening_is_accepted_and_cast_to_the_schema_type() {
+        // One file has fractional amounts (f64), the other integral (i64).
+        // The confirmed schema says f64: i64 is a *widening*, so BOTH files
+        // must stage, and the written part must really be f64.
+        let dir = temp_path("widening");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_text(&dir.join("a.csv"), &conform_csv("1,12.5,Alpha\n"));
+        write_text(&dir.join("b.csv"), &conform_csv("2,7,Gamma\n")); // amount = i64
+        let dest = temp_path("widening_dst");
+
+        let report = stage_folder_with_schema(&dir, &dest, &sample_schema()).expect("stage");
+        assert_eq!(
+            report.staged.len(),
+            2,
+            "widening must not reject: {:?}",
+            report.skipped
+        );
+        assert!(report.skipped.is_empty());
+        assert_eq!(report.total_rows, 2);
+
+        // Verify the *written* types: every part must have f64 amount.
+        let parts = crate::list_parts(&dest).expect("parts");
+        assert_eq!(parts.len(), 2);
+        for part in &parts {
+            let preview =
+                preview_source_with(&dest.join(&part.rel_path), 5, ReaderOptions::default())
+                    .expect("preview part");
+            let amount = preview
+                .columns
+                .iter()
+                .find(|c| c.name == "amount")
+                .expect("amount column");
+            assert_eq!(
+                amount.dtype, "f64",
+                "part {} kept {amount:?}",
+                part.rel_path
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(dest);
+    }
+
+    #[test]
+    fn incompatible_types_are_still_rejected() {
+        // str vs f64 is a conversion, not a widening: stays an error.
+        assert!(!types_compatible("f64", "str"));
+        assert!(!types_compatible("str", "i64"));
+        assert!(types_compatible("f64", "i64"));
+        assert!(types_compatible("i64", "i32"));
+        assert!(types_compatible("f64", "f32"));
+        assert!(types_compatible("str", "str"));
     }
 
     #[test]

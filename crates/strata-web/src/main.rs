@@ -32,7 +32,7 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use askama::Template;
@@ -42,6 +42,7 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Form, Router};
 use serde::Deserialize;
+use sysinfo::{Pid, ProcessesToUpdate, System};
 
 use strata_core::api;
 
@@ -59,6 +60,11 @@ struct AppState {
     source_roots: Vec<PathBuf>,
     /// Process start time, for the "uptime" chip.
     started: Instant,
+    /// Shared resource sampler (`sysinfo`). Kept in a `Mutex` because CPU%
+    /// needs two refreshes separated by time, so the instance must persist
+    /// between requests. This is the only lock in the service and it is held
+    /// for microseconds (no I/O inside).
+    system: Arc<Mutex<System>>,
 }
 
 impl AppState {
@@ -84,6 +90,7 @@ impl AppState {
                 workspace_root,
                 source_roots,
                 started: Instant::now(),
+                system: Arc::new(Mutex::new(System::new())),
             },
             addr,
         )
@@ -397,6 +404,146 @@ async fn stage_entity(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Resource metrics: "how much is the service eating?"
+// ---------------------------------------------------------------------------
+
+/// One resource snapshot for the status widget and `/metrics`.
+#[derive(Clone, Copy)]
+struct ResourceSample {
+    /// Resident set size of this process (bytes) — the "RAM the app uses".
+    rss_bytes: Option<u64>,
+    /// Process CPU usage in percent. The first sample after start is 0.0:
+    /// `sysinfo` needs two refreshes separated by time to compute a delta.
+    cpu_pct: Option<f32>,
+    /// Total physical memory of the host (bytes).
+    mem_total_bytes: u64,
+    /// Used physical memory of the host (bytes).
+    mem_used_bytes: u64,
+    /// Workspaces currently present.
+    workspaces: usize,
+}
+
+/// Take a fresh sample. Cheap: one process refresh + one memory refresh.
+fn sample_resources(state: &AppState) -> ResourceSample {
+    let pid = Pid::from_u32(std::process::id());
+    let workspaces = api::list_workspaces(&state.workspace_root)
+        .map(|w| w.len())
+        .unwrap_or(0);
+
+    let mut system = match state.system.lock() {
+        Ok(guard) => guard,
+        // A poisoned mutex must not take the whole service down: report
+        // "unknown" metrics instead.
+        Err(_) => {
+            return ResourceSample {
+                rss_bytes: None,
+                cpu_pct: None,
+                mem_total_bytes: 0,
+                mem_used_bytes: 0,
+                workspaces,
+            };
+        }
+    };
+
+    system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+    system.refresh_memory();
+
+    let process = system.process(pid);
+    ResourceSample {
+        rss_bytes: process.map(|p| p.memory()),
+        cpu_pct: process.map(|p| p.cpu_usage()),
+        mem_total_bytes: system.total_memory(),
+        mem_used_bytes: system.used_memory(),
+        workspaces,
+    }
+}
+
+/// Human byte formatting for the widget (`123 MB`, `1.4 GB`).
+fn human_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let value = bytes as f64;
+    if value >= GB {
+        format!("{:.2} GB", value / GB)
+    } else if value >= MB {
+        format!("{:.0} MB", value / MB)
+    } else if value >= KB {
+        format!("{:.0} KB", value / KB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// Fragment: the little live resource readout (htmx polls it every 2s).
+#[derive(Template)]
+#[template(path = "fragments/resources.html")]
+struct ResourcesFragment {
+    rss: String,
+    cpu: String,
+    host_mem: String,
+    workspaces: usize,
+}
+
+async fn resources_fragment(State(state): State<AppState>) -> WebResult<Html<String>> {
+    let sample = sample_resources(&state);
+    let fragment = ResourcesFragment {
+        rss: sample
+            .rss_bytes
+            .map(human_bytes)
+            .unwrap_or_else(|| String::from("—")),
+        cpu: sample
+            .cpu_pct
+            .map(|value| format!("{value:.0}%"))
+            .unwrap_or_else(|| String::from("—")),
+        host_mem: if sample.mem_total_bytes == 0 {
+            String::from("—")
+        } else {
+            format!(
+                "{}/{}",
+                human_bytes(sample.mem_used_bytes),
+                human_bytes(sample.mem_total_bytes)
+            )
+        },
+        workspaces: sample.workspaces,
+    };
+    Ok(Html(fragment.render().map_err(render_error)?))
+}
+
+/// `GET /metrics` — plain-text metrics for Prometheus-style scrapers
+/// (and for `curl`, which is how you debug it).
+async fn metrics(State(state): State<AppState>) -> String {
+    let sample = sample_resources(&state);
+    let mut out = String::new();
+    out.push_str("# HELP strata_process_rss_bytes Resident memory of the service process\n");
+    out.push_str("# TYPE strata_process_rss_bytes gauge\n");
+    out.push_str(&format!(
+        "strata_process_rss_bytes {}\n",
+        sample.rss_bytes.unwrap_or(0)
+    ));
+    out.push_str("# HELP strata_process_cpu_percent Process CPU usage (needs two samples)\n");
+    out.push_str("# TYPE strata_process_cpu_percent gauge\n");
+    out.push_str(&format!(
+        "strata_process_cpu_percent {:.2}\n",
+        sample.cpu_pct.unwrap_or(0.0)
+    ));
+    out.push_str(&format!(
+        "strata_host_memory_total_bytes {}\n",
+        sample.mem_total_bytes
+    ));
+    out.push_str(&format!(
+        "strata_host_memory_used_bytes {}\n",
+        sample.mem_used_bytes
+    ));
+    out.push_str(&format!(
+        "strata_uptime_seconds {}\n",
+        state.started.elapsed().as_secs()
+    ));
+    out.push_str(&format!("strata_workspaces_total {}\n", sample.workspaces));
+    out
+}
+
 /// `GET /healthz` — container healthcheck (also handy in `curl`).
 async fn healthz(State(state): State<AppState>) -> String {
     format!(
@@ -430,6 +577,8 @@ async fn main() {
     let app = Router::new()
         .route("/", get(index))
         .route("/healthz", get(healthz))
+        .route("/metrics", get(metrics))
+        .route("/fragments/resources", get(resources_fragment))
         .route("/workspaces", post(create_workspace))
         .route("/w/{slug}", get(hub))
         .route("/w/{slug}/scan", post(scan_root))

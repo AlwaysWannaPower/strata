@@ -43,8 +43,14 @@
     {% block content %}{% endblock %}
 </main>
 
-<footer class="max-w-6xl mx-auto px-5 py-6 text-xs text-slate-500 mono">
-    strata-web · axum + htmx · engine via strata_core::api
+<footer class="max-w-6xl mx-auto px-5 py-6 flex items-center justify-between gap-4 text-xs text-slate-500 mono">
+    <span>strata-web · axum + htmx · engine via strata_core::api</span>
+    {# Live resource readout: htmx fetches the fragment on load and every 2s.
+       No JS, no websockets — a plain HTTP poll of a tiny HTML snippet. #}
+    <span id="resources"
+          hx-get="/fragments/resources"
+          hx-trigger="load, every 2s"
+          hx-swap="innerHTML">—</span>
 </footer>
 </body>
 </html>
