@@ -1,0 +1,4 @@
+{# Ответ на «Save rules»: htmx подменяет #rules-panel, а таб-полоска обновляется
+   out-of-band (пилюля Rules показывает новое число правил). #}
+<div hx-swap-oob="outerHTML:#stage-tabs">{% include "fragments/stage_tabs.html" %}</div>
+{{ panel|safe }}

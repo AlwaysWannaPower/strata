@@ -1,0 +1,146 @@
+{# Стадия 4: ODS, карантин и передача.
+   Прогон запускается фоновой задачей (кнопка ▶), прогресс появляется в #ods-job
+   как htmx-фрагмент с поллингом. Ниже — манифест последнего прогона, таблица
+   карантина и история прогонов. #}
+<div id="ods-panel" class="space-y-4">
+    <div class="flex flex-wrap items-center gap-2">
+        <form hx-post="/w/{{ slug }}/e/{{ entity }}/runs" hx-target="#ods-job" hx-swap="innerHTML">
+            <button class="btn rounded-md px-3 py-1.5 text-xs border-emerald-700 text-emerald-300" type="submit"
+                    {% if !can_run %}disabled title="Confirm the schema first"{% endif %}>
+                Run ▶ <span class="spinner">…</span>
+            </button>
+        </form>
+        <span class="text-[11px] text-slate-500">{{ run_hint }}</span>
+        {% if has_run %}
+            <a class="ml-auto text-[11px] mono text-slate-400 hover:text-slate-200"
+               href="/w/{{ slug }}/e/{{ entity }}?tab=logs">open logs →</a>
+        {% endif %}
+    </div>
+
+    {# Сюда попадает фрагмент прогресса и его финальная сводка. #}
+    <div id="ods-job"></div>
+
+    {% if has_run %}
+        <div class="card rounded-lg border-l-4 border-l-[#4da3ff] p-3 space-y-2">
+            <div class="flex flex-wrap items-center gap-2">
+                <span class="text-[11px] uppercase tracking-wider text-slate-500">Latest run</span>
+                <a class="mono text-xs text-[#4da3ff] hover:underline" href="{{ run_href }}">{{ run_id }}</a>
+                <span class="text-[11px] px-1.5 py-0.5 rounded border mono {{ run_badge_class }}">{{ run_badge }}</span>
+                <span class="ml-auto text-[11px] mono text-slate-500">{{ started }} · {{ duration }}</span>
+            </div>
+            <div class="text-xs mono text-slate-400">
+                {{ rows_read }} read · {{ rows_valid }} in ODS · {{ rows_quarantine }} quarantine ·
+                {{ rows_warning }} warning · schema {{ schema_hash }}
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div class="card rounded-lg p-3 space-y-2">
+                <div class="text-[11px] uppercase tracking-wider text-slate-500">ODS parts</div>
+                {% if parts.is_empty() %}
+                    <p class="text-xs text-slate-500 italic">No ODS part — every row was rejected.</p>
+                {% else %}
+                    <ul class="text-[11px] mono space-y-0.5">
+                        {% for part in parts %}
+                            <li class="text-slate-300">{{ part.path }} <span class="text-slate-500">{{ part.rows }} row(s) · {{ part.size }}</span></li>
+                        {% endfor %}
+                    </ul>
+                {% endif %}
+                <div class="text-[11px] uppercase tracking-wider text-slate-500 pt-1">Quarantine parts</div>
+                {% if quarantine_parts.is_empty() %}
+                    <p class="text-xs text-slate-500 italic">No quarantine part for this run.</p>
+                {% else %}
+                    <ul class="text-[11px] mono space-y-0.5">
+                        {% for part in quarantine_parts %}
+                            <li class="text-amber-300">{{ part.path }} <span class="text-slate-500">{{ part.rows }} row(s) · {{ part.size }}</span></li>
+                        {% endfor %}
+                    </ul>
+                {% endif %}
+            </div>
+            <div class="card rounded-lg p-3 space-y-2">
+                <div class="text-[11px] uppercase tracking-wider text-slate-500">Reasons</div>
+                {% if rule_summaries.is_empty() %}
+                    <p class="text-xs text-slate-500 italic">No rule violations counted in this run.</p>
+                {% else %}
+                    <table class="w-full text-[11px] mono">
+                        <tbody>
+                            {% for rule in rule_summaries %}
+                                <tr class="border-b border-slate-900">
+                                    <td class="py-1 text-slate-300">{{ rule.column }}</td>
+                                    <td class="py-1 text-slate-400">{{ rule.rule }}</td>
+                                    <td class="py-1">
+                                        <span class="px-1.5 py-0.5 rounded border {{ rule.severity_class }}">{{ rule.severity }}</span>
+                                    </td>
+                                    <td class="py-1 text-right text-slate-300">{{ rule.violations }}</td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                {% endif %}
+            </div>
+        </div>
+
+        <div class="space-y-2">
+            <div class="text-[11px] uppercase tracking-wider text-slate-500">Quarantine</div>
+            <p class="text-[11px] text-slate-500">{{ quarantine_note }}</p>
+            {% if has_quarantine %}
+                <div class="overflow-x-auto">
+                    <table class="w-full text-[11px] mono">
+                        <thead class="text-slate-500">
+                            <tr class="border-b border-slate-800">
+                                <th class="text-left py-1 font-medium">file</th>
+                                <th class="text-left font-medium">row</th>
+                                <th class="text-left font-medium">column</th>
+                                <th class="text-left font-medium">rule</th>
+                                <th class="text-left font-medium">value</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for row in quarantine %}
+                                <tr class="border-b border-slate-900">
+                                    <td class="py-1 text-slate-400">{{ row.file }}</td>
+                                    <td class="py-1 text-slate-500">{{ row.row_index }}</td>
+                                    <td class="py-1 text-slate-300">{{ row.column }}</td>
+                                    <td class="py-1 text-amber-300">{{ row.rule }}</td>
+                                    <td class="py-1 text-slate-300">{{ row.value }}</td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            {% endif %}
+        </div>
+    {% endif %}
+
+    <div class="space-y-2">
+        <div class="text-[11px] uppercase tracking-wider text-slate-500">Run history</div>
+        {% if history.is_empty() %}
+            <p class="text-xs text-slate-500 italic">No runs yet. A run is immutable: each one creates runs/&lt;run_id&gt;/.</p>
+        {% else %}
+            <table class="w-full text-xs">
+                <thead class="text-[11px] uppercase tracking-wider text-slate-500">
+                    <tr>
+                        <th class="text-left py-1 font-medium">Run</th>
+                        <th class="text-left font-medium">Started (UTC)</th>
+                        <th class="text-left font-medium">Duration</th>
+                        <th class="text-left font-medium">Counts</th>
+                        <th class="text-left font-medium">Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for run in history %}
+                        <tr class="border-t border-slate-800">
+                            <td class="py-1.5 mono"><a class="text-[#4da3ff] hover:underline" href="{{ run.href }}">{{ run.run_id }}</a></td>
+                            <td class="py-1.5 mono text-slate-500">{{ run.started }}</td>
+                            <td class="py-1.5 mono text-slate-400">{{ run.duration }}</td>
+                            <td class="py-1.5 mono text-slate-400">{{ run.counts }}</td>
+                            <td class="py-1.5">
+                                <span class="text-[11px] px-1.5 py-0.5 rounded border mono {{ run.status_class }}">{{ run.status }}</span>
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+</div>

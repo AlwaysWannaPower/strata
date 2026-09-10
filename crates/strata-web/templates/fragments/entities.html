@@ -1,23 +1,29 @@
-{# Фрагмент: карточки сущностей. Возвращается страницей хаба и после подтверждения/запуска. #}
-{% if entities.is_empty() %}
+{# Фрагмент: строки сущностей воркспейса. Возвращается страницей хаба и после
+   подтверждения кандидата. У каждой строки видны статусы всех стадий
+   (пилюли) — состояние видно без кликов, как в §3 дизайна.
+   Кнопка «Open» ведёт на страницу сущности, где живут все стадии. #}
+{% if rows.is_empty() %}
     <p class="text-sm text-slate-500 italic">No entities confirmed yet — scan a root and confirm a candidate.</p>
 {% else %}
     <div class="space-y-2">
-    {% for e in entities %}
+    {% for row in rows %}
         <div class="card rounded-lg p-3 flex flex-wrap items-center gap-3">
-            <div class="min-w-0 flex-1">
-                <span class="mono text-sm">{{ e.entity }}</span>
-                {% if e.has_schema %}
-                    <span class="ml-2 text-[11px] px-1.5 py-0.5 rounded border border-emerald-700 text-emerald-400 mono">schema ✓</span>
-                {% else %}
-                    <span class="ml-2 text-[11px] px-1.5 py-0.5 rounded border border-amber-700 text-amber-400 mono">no schema</span>
-                {% endif %}
-                <div class="text-[11px] text-slate-500 mono truncate">{{ e.folder.display() }}</div>
+            <div class="min-w-0 flex-1 space-y-1">
+                <div class="flex flex-wrap items-center gap-2">
+                    <a class="mono text-sm hover:text-slate-100" href="/w/{{ slug }}/e/{{ row.entity }}">{{ row.entity }}</a>
+                    {% for pill in row.pills %}
+                        <span class="text-[11px] px-1.5 py-0.5 rounded border mono {{ pill.class }}">{{ pill.label }}: {{ pill.text }}</span>
+                    {% endfor %}
+                </div>
+                <div class="text-[11px] text-slate-500 mono truncate">{{ row.folder }}</div>
             </div>
-            {# Stage: серверный запуск staging с проверкой по схеме; фрагмент
-               попадает в #stage и не трогает список сущностей. #}
+            {# Open: страница сущности на первой незавершённой стадии. #}
+            <a class="btn rounded-md px-3 py-1.5 text-xs whitespace-nowrap"
+               href="/w/{{ slug }}/e/{{ row.entity }}">Open →</a>
+            {# Stage: сырой staging (файл → Parquet) без правил; стадия ODS живёт
+               на странице сущности и работает через фоновый прогон. #}
             <button class="btn rounded-md px-3 py-1.5 text-xs whitespace-nowrap"
-                    hx-post="/w/{{ slug }}/entities/{{ e.entity }}/stage"
+                    hx-post="/w/{{ slug }}/entities/{{ row.entity }}/stage"
                     hx-target="#stage"
                     hx-swap="innerHTML">
                 Stage ▶ <span class="spinner">…</span>

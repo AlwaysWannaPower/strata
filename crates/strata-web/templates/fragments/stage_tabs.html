@@ -1,0 +1,12 @@
+{# Таб-полоска стадий сущности с пилюлями статусов.
+   Включается в страницу сущности и возвращается после подтверждения схемы или
+   сохранения правил через htmx out-of-band swap (`hx-swap-oob`), чтобы статусы
+   не «застревали» на старых значениях. #}
+<div id="stage-tabs" class="flex flex-wrap items-center gap-2">
+    {% for t in tabs %}
+        <a href="/w/{{ slug }}/e/{{ entity }}?tab={{ t.key }}" class="{{ t.class }}">
+            <span>{{ t.label }}</span>
+            <span class="text-[11px] px-1.5 py-0.5 rounded border mono {{ t.pill.class }}">{{ t.pill.text }}</span>
+        </a>
+    {% endfor %}
+</div>

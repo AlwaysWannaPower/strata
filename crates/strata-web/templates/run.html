@@ -1,0 +1,179 @@
+{% extends "base.html" %}
+{% block title %}{{ entity }} · {{ run_id }}{% endblock %}
+
+{% block content %}
+{# Страница одного прогона. Прогон неизменяем, поэтому по этой ссылке видно ровно
+   то, что было отдано: манифест, файлы, карантин и лог. #}
+<nav class="text-[11px] mono text-slate-500 flex flex-wrap items-center gap-1">
+    <a class="hover:text-slate-300" href="/">Workspaces</a>
+    <span>/</span>
+    <a class="hover:text-slate-300" href="/w/{{ slug }}">{{ ws_name }}</a>
+    <span>/</span>
+    <a class="hover:text-slate-300" href="/w/{{ slug }}/e/{{ entity }}">{{ entity }}</a>
+    <span>/</span>
+    <span class="text-slate-200">{{ run_id }}</span>
+</nav>
+
+<section class="card rounded-xl">
+    <div class="card-head px-4 py-3 rounded-t-xl flex flex-wrap items-center gap-3">
+        <h1 class="text-base font-semibold mono">Run {{ run_id }}</h1>
+        <span class="text-[11px] px-1.5 py-0.5 rounded border mono {{ run_badge_class }}">{{ run_badge }}</span>
+        <span class="text-[11px] mono text-slate-500">{{ started }} → {{ finished }} · {{ duration }}</span>
+        <a class="ml-auto text-[11px] mono text-slate-400 hover:text-slate-200"
+           href="/w/{{ slug }}/e/{{ entity }}?tab=ods">← ODS tab</a>
+    </div>
+
+    <div class="p-4 space-y-5">
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div class="card rounded-lg p-3">
+                <div class="text-[11px] uppercase tracking-wider text-slate-500">Rows read</div>
+                <div class="mono text-lg">{{ rows_read }}</div>
+            </div>
+            <div class="card rounded-lg p-3">
+                <div class="text-[11px] uppercase tracking-wider text-slate-500">In ODS</div>
+                <div class="mono text-lg text-emerald-400">{{ rows_valid }}</div>
+            </div>
+            <div class="card rounded-lg p-3">
+                <div class="text-[11px] uppercase tracking-wider text-slate-500">Quarantine</div>
+                <div class="mono text-lg text-amber-400">{{ rows_quarantine }}</div>
+            </div>
+            <div class="card rounded-lg p-3">
+                <div class="text-[11px] uppercase tracking-wider text-slate-500">Warnings</div>
+                <div class="mono text-lg text-slate-300">{{ rows_warning }}</div>
+            </div>
+        </div>
+
+        <div class="text-[11px] mono text-slate-500">
+            schema hash <span class="text-slate-300">{{ schema_hash }}</span> · dataset
+            <span class="text-slate-300">{{ ods_dir }}</span>
+        </div>
+
+        {# --- Файлы: сырой слой никогда не пропускает файл молча. --- #}
+        <div class="space-y-2">
+            <div class="text-[11px] uppercase tracking-wider text-slate-500">Files</div>
+            {% if files.is_empty() %}
+                <p class="text-xs text-slate-500 italic">No file was part of this run.</p>
+            {% else %}
+                <table class="w-full text-xs">
+                    <tbody>
+                        {% for file in files %}
+                            <tr class="border-t border-slate-800">
+                                <td class="py-1.5 mono text-slate-200">{{ file.name }}</td>
+                                <td class="py-1.5 mono text-slate-400">{{ file.counts }}</td>
+                                {% if file.has_error %}
+                                    <td class="py-1.5 mono text-red-300">{{ file.error }}</td>
+                                {% else %}
+                                    <td></td>
+                                {% endif %}
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            {% endif %}
+        </div>
+
+        {# --- Части ODS и карантина. --- #}
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div class="card rounded-lg p-3 space-y-1">
+                <div class="text-[11px] uppercase tracking-wider text-slate-500">ODS parts</div>
+                {% if parts.is_empty() %}
+                    <p class="text-xs text-slate-500 italic">No ODS part was written.</p>
+                {% else %}
+                    <ul class="text-[11px] mono space-y-0.5">
+                        {% for part in parts %}
+                            <li class="text-slate-300">{{ part.path }} <span class="text-slate-500">{{ part.rows }} row(s) · {{ part.size }}</span></li>
+                        {% endfor %}
+                    </ul>
+                {% endif %}
+            </div>
+            <div class="card rounded-lg p-3 space-y-1">
+                <div class="text-[11px] uppercase tracking-wider text-slate-500">Quarantine parts</div>
+                {% if quarantine_parts.is_empty() %}
+                    <p class="text-xs text-slate-500 italic">No quarantine part was written.</p>
+                {% else %}
+                    <ul class="text-[11px] mono space-y-0.5">
+                        {% for part in quarantine_parts %}
+                            <li class="text-amber-300">{{ part.path }} <span class="text-slate-500">{{ part.rows }} row(s) · {{ part.size }}</span></li>
+                        {% endfor %}
+                    </ul>
+                {% endif %}
+            </div>
+        </div>
+
+        {# --- Нарушения по правилам. --- #}
+        <div class="space-y-2">
+            <div class="text-[11px] uppercase tracking-wider text-slate-500">Rule violations</div>
+            {% if rule_summaries.is_empty() %}
+                <p class="text-xs text-slate-500 italic">No rule violations in this run.</p>
+            {% else %}
+                <table class="w-full text-xs">
+                    <thead class="text-[11px] uppercase tracking-wider text-slate-500">
+                        <tr>
+                            <th class="text-left py-1 font-medium">Column</th>
+                            <th class="text-left font-medium">Rule</th>
+                            <th class="text-left font-medium">Severity</th>
+                            <th class="text-right font-medium">Violations</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for rule in rule_summaries %}
+                            <tr class="border-t border-slate-800">
+                                <td class="py-1.5 mono text-slate-200">{{ rule.column }}</td>
+                                <td class="py-1.5 mono text-slate-300">{{ rule.rule }}</td>
+                                <td class="py-1.5">
+                                    <span class="text-[11px] px-1.5 py-0.5 rounded border mono {{ rule.severity_class }}">{{ rule.severity }}</span>
+                                </td>
+                                <td class="py-1.5 text-right mono text-slate-300">{{ rule.violations }}</td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            {% endif %}
+        </div>
+
+        {# --- Карантин: строки с причиной, файлом и значением «как есть». --- #}
+        <div class="space-y-2">
+            <div class="text-[11px] uppercase tracking-wider text-slate-500">Quarantine rows</div>
+            {% if has_quarantine %}
+                <div class="overflow-x-auto">
+                    <table class="w-full text-[11px] mono">
+                        <thead class="text-slate-500">
+                            <tr class="border-b border-slate-800">
+                                <th class="text-left py-1 font-medium">file</th>
+                                <th class="text-left font-medium">row</th>
+                                <th class="text-left font-medium">column</th>
+                                <th class="text-left font-medium">rule</th>
+                                <th class="text-left font-medium">value</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for row in quarantine %}
+                                <tr class="border-b border-slate-900">
+                                    <td class="py-1 text-slate-400">{{ row.file }}</td>
+                                    <td class="py-1 text-slate-500">{{ row.row_index }}</td>
+                                    <td class="py-1 text-slate-300">{{ row.column }}</td>
+                                    <td class="py-1 text-amber-300">{{ row.rule }}</td>
+                                    <td class="py-1 text-slate-300">{{ row.value }}</td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            {% else %}
+                <p class="text-xs text-slate-500 italic">Quarantine is empty for this run.</p>
+            {% endif %}
+        </div>
+
+        {# --- Лог прогона (run.jsonl): машинночитаемая история решений. --- #}
+        <div class="space-y-2">
+            <div class="text-[11px] uppercase tracking-wider text-slate-500">Log (run.jsonl)</div>
+            {% if has_log %}
+                <pre class="card rounded-lg p-3 text-[11px] mono text-slate-300 overflow-x-auto max-h-[32rem] whitespace-pre-wrap">{% for line in lines %}{{ line }}
+{% endfor %}</pre>
+            {% else %}
+                <div class="card rounded-lg border-l-4 border-l-amber-500 p-3 text-xs mono text-amber-300">{{ log_error }}</div>
+            {% endif %}
+        </div>
+    </div>
+</section>
+{% endblock %}

@@ -1,0 +1,70 @@
+{# Отчёт «проверить на образце»: числа последствий до применения.
+   Это обязательный шаг перед сохранением правил: пользователь видит, сколько
+   строк пройдёт, сколько уйдёт в карантин и почему. #}
+<div hx-swap-oob="outerHTML:#stage-tabs">{% include "fragments/stage_tabs.html" %}</div>
+<div class="card rounded-lg border-l-4 border-l-[#4da3ff] p-3 space-y-2">
+    <div class="text-[11px] uppercase tracking-wider text-slate-500">Sample check</div>
+
+    {% if has_error %}
+        <div class="text-xs mono text-red-300">{{ error }}</div>
+    {% else %}
+        <div class="text-sm text-slate-300">
+            <span class="mono">{{ checked }}</span> row(s) checked ·
+            <span class="mono text-amber-300">{{ errors }}</span> to quarantine ·
+            <span class="mono text-slate-400">{{ warnings }}</span> with warnings
+        </div>
+        <p class="text-[11px] text-slate-500">
+            The engine validates the stored contract, so the draft was saved to
+            <span class="mono">schemas/{{ entity }}.toml</span> before this check.
+        </p>
+
+        {% if rules.is_empty() %}
+            <p class="text-xs text-slate-500 italic">No rule reached this sample — nothing to report.</p>
+        {% else %}
+            <table class="w-full text-xs">
+                <thead class="text-[11px] uppercase tracking-wider text-slate-500">
+                    <tr>
+                        <th class="text-left py-1 font-medium">Column</th>
+                        <th class="text-left font-medium">Rule</th>
+                        <th class="text-left font-medium">Severity</th>
+                        <th class="text-right font-medium">Violations</th>
+                        <th class="text-left font-medium pl-4">Examples</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for rule in rules %}
+                        <tr class="border-t border-slate-800">
+                            <td class="py-1.5 mono text-slate-200">{{ rule.column }}</td>
+                            <td class="py-1.5 mono text-slate-300">{{ rule.rule }}</td>
+                            <td class="py-1.5">
+                                <span class="text-[11px] px-1.5 py-0.5 rounded border mono {{ rule.severity_class }}">{{ rule.severity }}</span>
+                            </td>
+                            <td class="py-1.5 text-right mono text-slate-300">{{ rule.violations }}</td>
+                            <td class="py-1.5 pl-4 mono text-slate-500">{{ rule.examples }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+
+        {% if files.is_empty() %}
+            <p class="text-xs text-slate-500 italic">No file could be sampled.</p>
+        {% else %}
+            <div class="space-y-1">
+                {% for file in files %}
+                    <div class="text-[11px] mono text-slate-400">
+                        {{ file.name }} — {{ file.rows }} row(s),
+                        <span class="text-amber-300">{{ file.errors }} quarantine</span>,
+                        <span class="text-slate-400">{{ file.warnings }} warning</span>
+                        {% if file.has_issue %}
+                            <span class="text-red-400">· schema issue: {{ file.issue }}</span>
+                        {% endif %}
+                        {% for stat in file.stats %}
+                            <div class="pl-4 text-slate-500">{{ stat }}</div>
+                        {% endfor %}
+                    </div>
+                {% endfor %}
+            </div>
+        {% endif %}
+    {% endif %}
+</div>

@@ -1,0 +1,21 @@
+{# Финальный фрагмент фонового прогона: сводка манифеста.
+   Атрибутов поллинга здесь нет — цикл заканчивается этим ответом.
+   «Готов к отдаче» — это состояние: прогон завершён и нарушений уровня error нет. #}
+<div class="card rounded-lg border-l-4 border-l-[#4da3ff] p-3 space-y-2">
+    <div class="flex flex-wrap items-center gap-2">
+        <span class="mono text-sm">{{ entity }}</span>
+        <span class="text-[11px] mono text-slate-500">run {{ run_id }}</span>
+        <span class="text-[11px] px-1.5 py-0.5 rounded border mono {{ run_badge_class }}">{{ run_badge }}</span>
+        <span class="ml-auto text-[11px] mono text-slate-500">{{ duration }}</span>
+    </div>
+    <div class="text-xs mono text-slate-400">
+        {{ files }} file(s) · {{ rows_read }} read · {{ rows_valid }} in ODS ·
+        {{ rows_quarantine }} quarantine · {{ rows_warning }} warning ·
+        {{ parts }} ODS part(s) · {{ quarantine_parts }} quarantine part(s)
+    </div>
+    <div class="flex flex-wrap items-center gap-3 text-[11px]">
+        <a class="mono text-[#4da3ff] hover:underline" href="{{ run_href }}">open run page</a>
+        <a class="mono text-slate-400 hover:text-slate-200" href="/w/{{ slug }}/e/{{ entity }}?tab=ods">ODS tab</a>
+        <a class="mono text-slate-400 hover:text-slate-200" href="/w/{{ slug }}/e/{{ entity }}?tab=logs">log</a>
+    </div>
+</div>

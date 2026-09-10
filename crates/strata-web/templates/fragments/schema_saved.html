@@ -1,0 +1,4 @@
+{# Ответ на «Confirm schema»: htmx подменяет #schema-panel, а таб-полоска
+   обновляется out-of-band (пилюля Schema становится «confirmed»). #}
+<div hx-swap-oob="outerHTML:#stage-tabs">{% include "fragments/stage_tabs.html" %}</div>
+{{ panel|safe }}

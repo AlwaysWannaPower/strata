@@ -41,6 +41,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 mod auth;
+mod entity;
+mod forms;
+mod status;
 
 use askama::Template;
 use axum::extract::{Path as AxumPath, Request, State};
@@ -79,6 +82,12 @@ struct AppState {
     jobs: Arc<Mutex<HashMap<String, Arc<Mutex<JobEntry>>>>>,
     /// Монотонный источник id задач (`j1`, `j2`, …).
     job_seq: Arc<AtomicU64>,
+    /// Черновики контракта (колонки + правила), ещё не подтверждённые в TOML.
+    /// Ключ — `user_id:slug:entity` (см. `forms::draft_key`). Это единственное
+    /// изменяемое состояние сервиса: клиентского состояния в UI нет вообще,
+    /// поэтому всё, что пользователь накликал в таблицах схемы и правил, лежит
+    /// здесь, на сервере, и переживает перерисовку htmx-фрагментов.
+    drafts: Arc<Mutex<HashMap<String, entity::Draft>>>,
     /// Общий сэмплер ресурсов (`sysinfo`). Держим в `Mutex`, потому что CPU%
     /// требует двух обновлений, разделённых во времени, поэтому экземпляр должен
     /// переживать запросы. Это единственная блокировка в сервисе, и держится она
@@ -123,6 +132,7 @@ impl AppState {
                 started: Instant::now(),
                 jobs: Arc::new(Mutex::new(HashMap::new())),
                 job_seq: Arc::new(AtomicU64::new(1)),
+                drafts: Arc::new(Mutex::new(HashMap::new())),
                 system: Arc::new(Mutex::new(System::new())),
             },
             addr,
@@ -187,6 +197,12 @@ impl WebError {
             message: message.into(),
         }
     }
+
+    /// Человекочитаемая причина — нужна, когда ошибку показывают как текст
+    /// внутри фрагмента (например, отчёт «проверить на образце»).
+    fn message(&self) -> &str {
+        &self.message
+    }
 }
 
 impl From<auth::AuthError> for WebError {
@@ -214,25 +230,77 @@ impl IntoResponse for WebError {
 type WebResult<T> = Result<T, WebError>;
 
 // ---------------------------------------------------------------------------
-// Фоновые задачи: staging идёт вне запроса, браузер поллит фрагмент
+// Фоновые задачи: staging и прогон идут вне запроса, браузер поллит фрагмент
 // ---------------------------------------------------------------------------
 
 /// К какой сущности относится задача (нужно, чтобы отрендерить её финальный фрагмент).
 #[derive(Debug)]
 struct JobEntry {
     entity: String,
+    /// Подпись операции для фрагмента прогресса (`staging…`, `run…`).
+    label: String,
     state: JobState,
 }
 
-/// Жизненный цикл одного запуска staging.
+/// Итог фоновой задачи — то, что показывает финальный фрагмент.
+#[derive(Debug)]
+enum JobResult {
+    /// Staging (сырой слой: файл → Parquet).
+    Stage(Box<api::StageOutcome>),
+    /// Прогон (стадия ODS: части ODS, карантин, манифест, лог).
+    Run(Box<strata_core::RunOutcome>),
+}
+
+/// Жизненный цикл одной фоновой задачи.
 #[derive(Debug)]
 enum JobState {
     /// Работа идёт: `total == 0` означает «ещё не посчитано».
     Running { done: usize, total: usize },
     /// Завершилась успешно; результат несёт отчёт.
-    Done(Box<api::StageOutcome>),
+    Done(Box<JobResult>),
     /// Завершилась ошибкой движка/пользователя.
     Failed(String),
+}
+
+/// Зарегистрировать фоновую задачу и выполнить `work` в блокирующем потоке.
+///
+/// Это единственное место, где живёт «долгая операция»: обработчик сразу
+/// возвращает фрагмент прогресса, браузер поллит `/w/{slug}/jobs/{job_id}`, а
+/// `work` сообщает `(done, total)` через колбэк. Реестр задач крошечный:
+/// записи удаляются, как только финальный фрагмент отдан.
+fn spawn_job<F>(state: &AppState, entity: String, label: &str, work: F) -> WebResult<String>
+where
+    F: FnOnce(&mut dyn FnMut(usize, usize)) -> Result<JobResult, api::ApiError> + Send + 'static,
+{
+    let job_id = format!("j{}", state.job_seq.fetch_add(1, Ordering::Relaxed));
+    let entry = Arc::new(Mutex::new(JobEntry {
+        entity,
+        label: label.to_string(),
+        state: JobState::Running { done: 0, total: 0 },
+    }));
+    state
+        .jobs
+        .lock()
+        .map_err(|_| WebError::internal("job registry poisoned"))?
+        .insert(job_id.clone(), entry.clone());
+
+    // Вызов движка выполняется в блокирующем потоке; прогресс кладётся в общее
+    // состояние задачи, откуда его читает эндпоинт поллинга.
+    tokio::task::spawn_blocking(move || {
+        let mut progress = |done: usize, total: usize| {
+            if let Ok(mut guard) = entry.lock() {
+                guard.state = JobState::Running { done, total };
+            }
+        };
+        let result = work(&mut progress);
+        if let Ok(mut guard) = entry.lock() {
+            guard.state = match result {
+                Ok(done) => JobState::Done(Box::new(done)),
+                Err(error) => JobState::Failed(error.message().to_string()),
+            };
+        }
+    });
+    Ok(job_id)
 }
 
 /// Фрагмент: прогресс идущей задачи. Он **сам себя поллит** (`hx-get` на
@@ -244,6 +312,8 @@ struct JobRunningFragment {
     slug: String,
     job_id: String,
     entity: String,
+    /// Что именно идёт (`staging…`, `run…`).
+    label: String,
     done: usize,
     total: usize,
     percent: usize,
@@ -306,13 +376,16 @@ struct IndexTemplate {
 }
 
 /// «Хаб пайплайна» воркспейса: сущности, форма сканирования, кнопки запуска staging.
+///
+/// В строках сущностей видны статусы всех четырёх стадий (пилюли) и кнопка
+/// «Open», ведущая на страницу сущности (`/w/{slug}/e/{entity}`).
 #[derive(Template)]
 #[template(path = "hub.html")]
 struct HubTemplate {
     slug: String,
     name: String,
     data_dir: String,
-    entities: Vec<api::EntityInfo>,
+    rows: Vec<entity::EntityRowView>,
     uptime_secs: u64,
 }
 
@@ -321,7 +394,7 @@ struct HubTemplate {
 #[template(path = "fragments/entities.html")]
 struct EntitiesFragment {
     slug: String,
-    entities: Vec<api::EntityInfo>,
+    rows: Vec<entity::EntityRowView>,
 }
 
 /// Фрагмент: кандидаты сканирования с формами «подтвердить и привязать».
@@ -454,7 +527,7 @@ async fn hub(
         slug,
         name: info.name,
         data_dir: info.data_dir.display().to_string(),
-        entities: api::entities(&dir)?,
+        rows: entity::entity_rows(&dir)?,
         uptime_secs: state.started.elapsed().as_secs(),
     };
     Ok(Html(page.render().map_err(render_error)?))
@@ -503,7 +576,7 @@ async fn add_entity(
     }
     let fragment = EntitiesFragment {
         slug,
-        entities: api::entities(&dir)?,
+        rows: entity::entity_rows(&dir)?,
     };
     Ok(Html(fragment.render().map_err(render_error)?))
 }
@@ -523,40 +596,20 @@ async fn stage_entity(
     let user_id = signed_in(&session).await?;
     let dir = require_workspace(&state, user_id, &slug)?;
 
-    let job_id = format!("j{}", state.job_seq.fetch_add(1, Ordering::Relaxed));
-    let entry = Arc::new(Mutex::new(JobEntry {
-        entity: entity.clone(),
-        state: JobState::Running { done: 0, total: 0 },
-    }));
-    state
-        .jobs
-        .lock()
-        .map_err(|_| WebError::internal("job registry poisoned"))?
-        .insert(job_id.clone(), entry.clone());
-
-    // Вызов движка выполняется в блокирующем потоке; прогресс кладётся в общее
-    // состояние задачи, откуда его читает эндпоинт поллинга.
-    let task_entry = entry.clone();
     let task_dir = dir.clone();
     let task_entity = entity.clone();
-    tokio::task::spawn_blocking(move || {
-        let result = api::stage_entity_with_progress(&task_dir, &task_entity, |done, total| {
-            if let Ok(mut guard) = task_entry.lock() {
-                guard.state = JobState::Running { done, total };
-            }
-        });
-        if let Ok(mut guard) = task_entry.lock() {
-            guard.state = match result {
-                Ok(outcome) => JobState::Done(Box::new(outcome)),
-                Err(error) => JobState::Failed(error.message().to_string()),
-            };
-        }
-    });
+    let job_id = spawn_job(&state, entity.clone(), "staging…", move |progress| {
+        let outcome = api::stage_entity_with_progress(&task_dir, &task_entity, |done, total| {
+            progress(done, total)
+        })?;
+        Ok(JobResult::Stage(Box::new(outcome)))
+    })?;
 
     let fragment = JobRunningFragment {
         slug,
         job_id,
         entity,
+        label: String::from("staging…"),
         done: 0,
         total: 0,
         percent: 0,
@@ -595,11 +648,12 @@ async fn job_status(
         Running { done: usize, total: usize },
         Final(JobState),
     }
-    let (entity, snapshot) = {
+    let (entity, label, snapshot) = {
         let mut guard = entry
             .lock()
             .map_err(|_| WebError::internal("job state poisoned"))?;
         let entity = guard.entity.clone();
+        let label = guard.label.clone();
         let snapshot = match &guard.state {
             JobState::Running { done, total } => Snapshot::Running {
                 done: *done,
@@ -615,7 +669,7 @@ async fn job_status(
                 Snapshot::Final(taken)
             }
         };
-        (entity, snapshot)
+        (entity, label, snapshot)
     };
 
     let (html, is_final) = match snapshot {
@@ -629,19 +683,32 @@ async fn job_status(
                 slug,
                 job_id: job_id.clone(),
                 entity,
+                label,
                 done,
                 total,
                 percent,
             };
             (fragment.render().map_err(render_error)?, false)
         }
-        Snapshot::Final(JobState::Done(outcome)) => {
-            let fragment = StageFragment {
-                entity,
-                outcome: *outcome,
-            };
-            (fragment.render().map_err(render_error)?, true)
-        }
+        Snapshot::Final(JobState::Done(result)) => match *result {
+            // Staging: отчёт сырого слоя (файлы, строки, части).
+            JobResult::Stage(outcome) => (
+                StageFragment {
+                    entity,
+                    outcome: *outcome,
+                }
+                .render()
+                .map_err(render_error)?,
+                true,
+            ),
+            // Прогон: сводка манифеста + ссылка на страницу прогона.
+            JobResult::Run(outcome) => (
+                entity::run_result_fragment(&slug, &outcome)?
+                    .render()
+                    .map_err(render_error)?,
+                true,
+            ),
+        },
         Snapshot::Final(JobState::Failed(message)) => (
             ErrorFragment { message }.render().map_err(render_error)?,
             true,
@@ -975,6 +1042,46 @@ async fn main() {
         .route("/w/{slug}/entities", post(add_entity))
         .route("/w/{slug}/entities/{entity}/stage", post(stage_entity))
         .route("/w/{slug}/jobs/{job_id}", get(job_status))
+        // --- Страница сущности: стадии пайплайна (UI-1…UI-4) --------------------
+        // Стадии — это табы одной страницы (`?tab=`), а не пункты меню.
+        .route("/w/{slug}/e/{entity}", get(entity::entity_page))
+        .route("/w/{slug}/e/{entity}/runs/{run_id}", get(entity::run_page))
+        // Файлы: перечитать список и показать превью (в т.ч. выгрузить его как CSV).
+        .route(
+            "/w/{slug}/e/{entity}/files/reload",
+            post(entity::files_reload),
+        )
+        .route(
+            "/w/{slug}/e/{entity}/files/preview",
+            post(entity::file_preview_fragment),
+        )
+        .route(
+            "/w/{slug}/e/{entity}/files/preview.csv",
+            get(entity::preview_csv),
+        )
+        // Схема: черновик в памяти сервиса, подтверждение пишет schemas/<entity>.toml.
+        .route(
+            "/w/{slug}/e/{entity}/schema/infer",
+            post(entity::schema_infer),
+        )
+        .route(
+            "/w/{slug}/e/{entity}/schema/column",
+            post(entity::schema_column),
+        )
+        .route(
+            "/w/{slug}/e/{entity}/schema/confirm",
+            post(entity::schema_confirm),
+        )
+        // Правила: конструктор в контексте колонки + проверка на образце.
+        .route("/w/{slug}/e/{entity}/rules", post(entity::rules_change))
+        .route("/w/{slug}/e/{entity}/rules/save", post(entity::rules_save))
+        .route(
+            "/w/{slug}/e/{entity}/validate",
+            post(entity::validate_sample),
+        )
+        // Стадия ODS: прогон в фоне (прогресс поллит `/jobs/{job_id}`) и логи.
+        .route("/w/{slug}/e/{entity}/runs", post(entity::start_run))
+        .route("/w/{slug}/e/{entity}/logs", post(entity::logs_select))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_login));
 
     let app = Router::new()

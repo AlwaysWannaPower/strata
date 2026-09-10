@@ -1,0 +1,64 @@
+{# Стадия 1: файлы сущности и превью чтения.
+   Список файлов и превью перерисовываются как htmx-фрагменты: смена файла в
+   превью целится в #file-preview, «Re-read files» — в #files-panel. #}
+<div id="files-panel" class="space-y-4">
+    <div class="flex flex-wrap items-center gap-3">
+        <span class="text-[11px] mono text-slate-500 truncate">Folder: {{ folder }}</span>
+        <span class="text-[11px] mono text-slate-500">· {{ total_size }} total</span>
+        <form class="ml-auto" hx-post="/w/{{ slug }}/e/{{ entity }}/files/reload"
+              hx-target="#files-panel" hx-swap="outerHTML">
+            <button class="btn rounded-md px-3 py-1.5 text-xs" type="submit">
+                Re-read files <span class="spinner">…</span>
+            </button>
+        </form>
+    </div>
+
+    {# Явная строка «как читаем»: пользователь должен видеть, какие опции
+       применены (автоопределение или подтверждённая схема). #}
+    <p class="text-[11px] text-slate-500">{{ reader_note }}</p>
+
+    {% if has_error %}
+        <div class="card rounded-lg border-l-4 border-l-red-500 p-3 text-xs mono text-red-300">{{ error }}</div>
+    {% endif %}
+
+    {% if files.is_empty() %}
+        <p class="text-sm text-slate-500 italic">
+            No data files in the bound folder. Check the folder path in the hub, or rescan the source root.
+        </p>
+    {% else %}
+        <table class="w-full text-xs">
+            <thead class="text-[11px] uppercase tracking-wider text-slate-500">
+                <tr>
+                    <th class="text-left py-1 font-medium">File</th>
+                    <th class="text-left font-medium">Size</th>
+                    <th class="text-left font-medium">Kind</th>
+                    <th class="text-left font-medium">Status</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for f in files %}
+                    <tr class="border-t border-slate-800">
+                        <td class="py-1.5 mono text-slate-200">{{ f.name }}</td>
+                        <td class="mono text-slate-400">{{ f.size }}</td>
+                        <td class="mono text-slate-400">{{ f.kind }}</td>
+                        <td>
+                            <span class="text-[11px] px-1.5 py-0.5 rounded border mono {{ f.status_class }}">{{ f.status }}</span>
+                        </td>
+                        <td class="text-right">
+                            <form hx-post="/w/{{ slug }}/e/{{ entity }}/files/preview"
+                                  hx-target="#file-preview" hx-swap="outerHTML">
+                                <input type="hidden" name="file" value="{{ f.name }}">
+                                <button class="btn rounded-md px-2 py-1 text-[11px]" type="submit">Preview</button>
+                            </form>
+                        </td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    {% endif %}
+
+    {# Превью: рендерится отдельным фрагментом, поэтому его можно подменить
+       одним нажатием, не перерисовывая таблицу. #}
+    {{ preview_html|safe }}
+</div>

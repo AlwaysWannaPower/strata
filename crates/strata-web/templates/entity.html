@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}{{ entity }}{% endblock %}
+
+{% block content %}
+{# Страница сущности — главный экран работы: одна таблица от грязного файла до
+   ODS. Стадии — табы одной страницы (§2 дизайна), а не пункты меню.
+   Тело активной стадии отрендерено тем же фрагментом, который возвращают
+   htmx-обработчики, поэтому разметка описана один раз. #}
+<nav class="text-[11px] mono text-slate-500 flex flex-wrap items-center gap-1">
+    <a class="hover:text-slate-300" href="/">Workspaces</a>
+    <span>/</span>
+    <a class="hover:text-slate-300" href="/w/{{ slug }}">{{ ws_name }}</a>
+    <span>/</span>
+    <span class="text-slate-200">{{ entity }}</span>
+</nav>
+
+<section class="card rounded-xl" data-stage="{{ tab }}">
+    <div class="card-head px-4 py-3 rounded-t-xl flex flex-wrap items-center gap-3">
+        <h1 class="text-base font-semibold mono">{{ entity }}</h1>
+        <span class="text-[11px] mono text-slate-500 truncate">folder: {{ folder }}</span>
+        <a class="ml-auto text-[11px] mono text-slate-400 hover:text-slate-200" href="/w/{{ slug }}">← back to hub</a>
+    </div>
+
+    <div class="px-3 py-3 border-b border-slate-800">
+        {% include "fragments/stage_tabs.html" %}
+    </div>
+
+    <div class="p-4">
+        {{ body|safe }}
+    </div>
+</section>
+{% endblock %}

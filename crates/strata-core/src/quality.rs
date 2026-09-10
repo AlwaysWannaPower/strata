@@ -340,8 +340,9 @@ fn count_duplicates(column: &Column) -> crate::Result<HashMap<String, usize>> {
 
 #[cfg(test)]
 mod tests {
+    // `super::*` уже приносит нужные имена Polars (модуль импортирует prelude),
+    // поэтому отдельный `use polars::prelude::*` здесь был бы дублированием.
     use super::*;
-    use polars::prelude::*;
 
     /// Простой кадр для проверок: id, amount, email, date.
     fn sample_frame() -> DataFrame {

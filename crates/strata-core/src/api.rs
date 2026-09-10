@@ -723,6 +723,36 @@ pub fn entity_run_manifest(
     crate::read_manifest(&dataset_dir, run_id).map_err(|e| err("не удалось прочитать манифест", e))
 }
 
+/// Последние строки лога прогона (`run.jsonl`) — для страницы прогона и вкладки Logs.
+///
+/// Читает `data/<entity>/runs/<run_id>/run.jsonl` и возвращает **последние**
+/// `limit` строк: движок пишет лог по ходу прогона, поэтому «хвост» — это самое
+/// интересное (`start`, файлы, финал). Нечитаемый или отсутствующий файл — это
+/// ошибка, а не пустой список: «лога нет» и «лог был, но не читается» — разные
+/// состояния, и UI обязан их различать.
+pub fn entity_run_log(
+    workspace_dir: &Path,
+    entity: &str,
+    run_id: &str,
+    limit: usize,
+) -> ApiResult<Vec<String>> {
+    let config = load_config(workspace_dir)?;
+    let path = data_dir(workspace_dir, &config)
+        .join(entity)
+        .join("runs")
+        .join(run_id)
+        .join("run.jsonl");
+    let text = std::fs::read_to_string(&path).map_err(|e| {
+        err(
+            "не удалось прочитать лог прогона",
+            format!("{}: {e}", path.display()),
+        )
+    })?;
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(limit);
+    Ok(lines[start..].iter().map(|line| line.to_string()).collect())
+}
+
 /// Строки карантина конкретного прогона (для таблицы в UI).
 pub fn entity_quarantine(
     workspace_dir: &Path,
@@ -857,6 +887,42 @@ mod tests {
         assert_eq!(slugify("Продажи 2026"), "продажи-2026");
         assert_eq!(slugify("  a  b  "), "a-b");
         assert_eq!(slugify("!!!"), "workspace");
+    }
+
+    #[test]
+    fn run_log_returns_last_lines_and_reports_missing_file() {
+        let root = temp_dir("log_root");
+        let ws = create_workspace_in(&root, "logs").expect("воркспейс");
+
+        // Лог прогона лежит там, где его пишет движок: data/<entity>/runs/<run_id>/run.jsonl.
+        let run_dir = ws.data_dir.join("sales").join("runs").join("run-1");
+        std::fs::create_dir_all(&run_dir).expect("папка прогона");
+        let mut file = std::fs::File::create(run_dir.join("run.jsonl")).expect("лог");
+        for line in 1..=5 {
+            writeln!(file, "{{\"phase\":\"file\",\"line\":{line}}}").expect("строка лога");
+        }
+        drop(file);
+
+        // Берём «хвост»: интересны последние строки, а не начало.
+        let tail = entity_run_log(&ws.dir, "sales", "run-1", 2).expect("лог прочитан");
+        assert_eq!(tail.len(), 2);
+        assert!(tail[1].contains("\"line\":5"));
+
+        // `limit` больше файла — отдаём весь лог, без паники.
+        let all = entity_run_log(&ws.dir, "sales", "run-1", 100).expect("весь лог");
+        assert_eq!(all.len(), 5);
+        // `limit = 0` — пустой хвост (валидный запрос: «ничего не показывать»).
+        assert!(
+            entity_run_log(&ws.dir, "sales", "run-1", 0)
+                .expect("пусто")
+                .is_empty()
+        );
+
+        // Нет прогона → ошибка с причиной, а не тихий пустой ответ.
+        let missing = entity_run_log(&ws.dir, "sales", "run-nope", 10);
+        assert!(missing.is_err());
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -1,0 +1,44 @@
+{# Превью одного файла: первые строки и — главное — «как он прочитан».
+   Строка Read as приходит от движка (формат, разделитель, кодировка): именно
+   она снимает вопрос «а точно ли мой файл прочитан правильно». #}
+<div id="file-preview" class="space-y-2">
+    <div class="flex flex-wrap items-center gap-3">
+        <span class="text-xs mono text-slate-300">Preview: {{ file }}</span>
+        {% if has_error %}
+            <span class="text-[11px] px-1.5 py-0.5 rounded border border-red-700 text-red-400 mono">not read</span>
+        {% else %}
+            <span class="text-[11px] mono text-slate-500">first {{ max_rows }} row(s)</span>
+            <span class="text-[11px] mono text-slate-400">· read as {{ source }}</span>
+            <a class="ml-auto text-[11px] mono text-slate-400 hover:text-slate-200" href="{{ csv_href }}">download preview as CSV</a>
+        {% endif %}
+    </div>
+
+    {% if has_error %}
+        <div class="card rounded-lg border-l-4 border-l-amber-500 p-3 text-xs mono text-amber-300">{{ error }}</div>
+    {% endif %}
+
+    {% if columns.is_empty() %}
+        <p class="text-xs text-slate-500 italic">Nothing to show: no readable columns in this file.</p>
+    {% else %}
+        <div class="overflow-x-auto">
+            <table class="w-full text-[11px] mono">
+                <thead class="text-slate-500">
+                    <tr class="border-b border-slate-800">
+                        {% for column in columns %}
+                            <th class="text-left py-1 pr-3 font-medium whitespace-nowrap">{{ column }}</th>
+                        {% endfor %}
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in rows %}
+                        <tr class="border-b border-slate-900">
+                            {% for cell in row %}
+                                <td class="py-1 pr-3 text-slate-300 whitespace-nowrap">{{ cell }}</td>
+                            {% endfor %}
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    {% endif %}
+</div>

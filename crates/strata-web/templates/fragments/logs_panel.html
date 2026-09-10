@@ -1,0 +1,42 @@
+{# Стадия Logs: список прогонов и машинночитаемый лог выбранного (run.jsonl).
+   Логи структурные (фаза, файл, решение, время), поэтому из них всегда понятно,
+   что прочитано, что отброшено и почему. #}
+<div id="logs-panel" class="space-y-4">
+    <div class="flex flex-wrap items-center gap-3">
+        <span class="text-[11px] uppercase tracking-wider text-slate-500">Runs</span>
+        {% if has_runs %}
+            <form class="ml-auto flex items-center gap-2"
+                  hx-post="/w/{{ slug }}/e/{{ entity }}/logs"
+                  hx-target="#logs-panel" hx-swap="outerHTML">
+                <select class="input mono rounded-md px-2 py-1 text-xs" name="run_id"
+                        hx-post="/w/{{ slug }}/e/{{ entity }}/logs"
+                        hx-include="closest form"
+                        hx-target="#logs-panel" hx-swap="outerHTML"
+                        hx-trigger="change">
+                    {% for run in runs %}
+                        {% if run.selected %}
+                            <option value="{{ run.run_id }}" selected>{{ run.run_id }} · {{ run.status }}</option>
+                        {% else %}
+                            <option value="{{ run.run_id }}">{{ run.run_id }} · {{ run.status }}</option>
+                        {% endif %}
+                    {% endfor %}
+                </select>
+                <button class="btn rounded-md px-3 py-1.5 text-xs" type="submit">Show log</button>
+            </form>
+        {% endif %}
+    </div>
+
+    {% if has_log %}
+        <div class="text-[11px] mono text-slate-500">
+            run.jsonl of {{ selected }} — last {{ lines.len() }} line(s) (newest at the bottom)
+        </div>
+        <pre class="card rounded-lg p-3 text-[11px] mono text-slate-300 overflow-x-auto max-h-[32rem] whitespace-pre-wrap">{% for line in lines %}{{ line }}
+{% endfor %}</pre>
+        <div class="text-[11px]">
+            <a class="mono text-slate-400 hover:text-slate-200"
+               href="/w/{{ slug }}/e/{{ entity }}/runs/{{ selected }}">open run page →</a>
+        </div>
+    {% else %}
+        <div class="card rounded-lg border-l-4 border-l-amber-500 p-3 text-xs mono text-amber-300">{{ log_error }}</div>
+    {% endif %}
+</div>

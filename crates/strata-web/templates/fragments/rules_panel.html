@@ -1,0 +1,146 @@
+{# Стадия 3: правила и ограничения.
+   Конструктор живёт в контексте колонки: выбрать колонку → тип правила →
+   параметры. Никакого free-text SQL. Форма показывает все поля параметров
+   сразу (динамических полей без JS не бывает) и в отчёте видно, что получилось. #}
+<div id="rules-panel" class="space-y-4">
+    <div class="flex flex-wrap items-center gap-2">
+        <span class="text-[11px] px-1.5 py-0.5 rounded border border-slate-700 text-slate-400 mono">
+            {{ rules.len() }} rule(s) in draft
+        </span>
+        <span class="text-[11px] mono text-slate-500">
+            · stored in schemas/{{ entity }}.toml (one schema = one contract)
+        </span>
+        <div class="ml-auto flex flex-wrap items-center gap-2">
+            <form hx-post="/w/{{ slug }}/e/{{ entity }}/validate"
+                  hx-target="#validation" hx-swap="innerHTML">
+                <button class="btn rounded-md px-3 py-1.5 text-xs" type="submit"
+                        {% if !has_columns %}disabled{% endif %}>
+                    Check on sample (1000 rows) <span class="spinner">…</span>
+                </button>
+            </form>
+            <form hx-post="/w/{{ slug }}/e/{{ entity }}/rules/save"
+                  hx-target="#rules-panel" hx-swap="outerHTML">
+                <button class="btn rounded-md px-3 py-1.5 text-xs border-emerald-700 text-emerald-300" type="submit"
+                        {% if !has_columns %}disabled{% endif %}>
+                    Save rules <span class="spinner">…</span>
+                </button>
+            </form>
+        </div>
+    </div>
+
+    {% if has_notice %}
+        <div class="card rounded-lg border-l-4 border-l-emerald-600 p-3 text-xs mono text-emerald-300">{{ notice }}</div>
+    {% endif %}
+    {% if has_error %}
+        <div class="card rounded-lg border-l-4 border-l-red-500 p-3 text-xs mono text-red-300">{{ error }}</div>
+    {% endif %}
+
+    {% if rules.is_empty() %}
+        <p class="text-sm text-slate-500 italic">
+            No rules yet. Without rules every readable row goes straight to ODS — that is fine as a first pass,
+            but then nothing gets quarantined.
+        </p>
+    {% else %}
+        <table class="w-full text-xs">
+            <thead class="text-[11px] uppercase tracking-wider text-slate-500">
+                <tr>
+                    <th class="text-left py-1 font-medium">Column</th>
+                    <th class="text-left font-medium">Rule</th>
+                    <th class="text-left font-medium">Parameters</th>
+                    <th class="text-left font-medium">Severity</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for rule in rules %}
+                    <tr class="border-t border-slate-800">
+                        <td class="py-1.5 mono text-slate-200">{{ rule.column }}</td>
+                        <td class="py-1.5 mono text-slate-300">{{ rule.kind }}</td>
+                        <td class="py-1.5 mono text-slate-400">{{ rule.params }}</td>
+                        <td class="py-1.5">
+                            <span class="text-[11px] px-1.5 py-0.5 rounded border mono {{ rule.severity_class }}">{{ rule.severity }}</span>
+                        </td>
+                        <td class="py-1.5 text-right">
+                            <form hx-post="/w/{{ slug }}/e/{{ entity }}/rules"
+                                  hx-target="#rules-panel" hx-swap="outerHTML">
+                                <input type="hidden" name="action" value="delete">
+                                <input type="hidden" name="index" value="{{ rule.index }}">
+                                <button class="btn rounded-md px-2 py-1 text-[11px]" type="submit" title="Remove rule">✕</button>
+                            </form>
+                        </td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    {% endif %}
+
+    {# Добавление правила: колонка → тип → параметры → строгость. #}
+    <div class="card rounded-lg p-3 space-y-2">
+        <div class="text-[11px] uppercase tracking-wider text-slate-500">Add rule</div>
+        {% if columns.is_empty() %}
+            <p class="text-xs text-slate-500 italic">Confirm a schema first — rules are attached to columns.</p>
+        {% else %}
+            <form class="grid grid-cols-1 md:grid-cols-3 gap-2"
+                  hx-post="/w/{{ slug }}/e/{{ entity }}/rules"
+                  hx-target="#rules-panel" hx-swap="outerHTML">
+                <input type="hidden" name="action" value="add">
+                <label class="space-y-1">
+                    <span class="text-[11px] text-slate-500">Column</span>
+                    <select class="input mono rounded-md px-2 py-1 text-xs w-full" name="column">
+                        {% for column in columns %}
+                            <option value="{{ column.value }}">{{ column.label }}</option>
+                        {% endfor %}
+                    </select>
+                </label>
+                <label class="space-y-1">
+                    <span class="text-[11px] text-slate-500">Rule type</span>
+                    <select class="input mono rounded-md px-2 py-1 text-xs w-full" name="rule_type">
+                        {% for option in rule_types %}
+                            <option value="{{ option.value }}">{{ option.label }}</option>
+                        {% endfor %}
+                    </select>
+                </label>
+                <label class="space-y-1">
+                    <span class="text-[11px] text-slate-500">Severity</span>
+                    <select class="input mono rounded-md px-2 py-1 text-xs w-full" name="severity">
+                        {% for option in severities %}
+                            <option value="{{ option.value }}">{{ option.label }}</option>
+                        {% endfor %}
+                    </select>
+                </label>
+                <label class="space-y-1">
+                    <span class="text-[11px] text-slate-500">min (range)</span>
+                    <input class="input mono rounded-md px-2 py-1 text-xs w-full" type="text" name="min" placeholder="e.g. 0">
+                </label>
+                <label class="space-y-1">
+                    <span class="text-[11px] text-slate-500">max (range)</span>
+                    <input class="input mono rounded-md px-2 py-1 text-xs w-full" type="text" name="max" placeholder="e.g. 1000000">
+                </label>
+                <label class="space-y-1">
+                    <span class="text-[11px] text-slate-500">pattern (regex)</span>
+                    <input class="input mono rounded-md px-2 py-1 text-xs w-full" type="text" name="pattern" placeholder="^[A-Z]{2}$">
+                </label>
+                <label class="space-y-1">
+                    <span class="text-[11px] text-slate-500">format (date_format)</span>
+                    <input class="input mono rounded-md px-2 py-1 text-xs w-full" type="text" name="format" placeholder="%Y-%m-%d">
+                </label>
+                <label class="space-y-1 md:col-span-2">
+                    <span class="text-[11px] text-slate-500">values (allowed_values, comma-separated)</span>
+                    <input class="input mono rounded-md px-2 py-1 text-xs w-full" type="text" name="values" placeholder="draft, paid, refunded">
+                </label>
+                <div class="md:col-span-3 flex items-center gap-3">
+                    <button class="btn rounded-md px-3 py-1.5 text-xs" type="submit">
+                        Add rule to draft <span class="spinner">…</span>
+                    </button>
+                    <span class="text-[11px] text-slate-500">
+                        Parameters that do not belong to the chosen type are ignored. «Check on sample» saves the
+                        draft first, because the engine validates the stored contract.
+                    </span>
+                </div>
+            </form>
+        {% endif %}
+    </div>
+
+    {# Отчёт «проверить на образце» приходит сюда отдельным фрагментом. #}
+    <div id="validation"></div>
+</div>

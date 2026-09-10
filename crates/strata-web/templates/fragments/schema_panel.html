@@ -1,0 +1,124 @@
+{# Стадия 2: схема — черновик колонок.
+   Инференс — это предложение, а не факт: сверху написано, чем он получен, есть
+   «Re-infer», а контракт фиксируется только кнопкой «Confirm schema» (она пишет
+   schemas/<entity>.toml). Правки копятся в черновике на сервере, поэтому
+   перерисовка фрагмента ничего не теряет. #}
+<div id="schema-panel" class="space-y-4">
+    <div class="flex flex-wrap items-center gap-2">
+        {% if confirmed %}
+            <span class="text-[11px] px-1.5 py-0.5 rounded border border-emerald-700 text-emerald-400 mono">confirmed contract</span>
+        {% else %}
+            <span class="text-[11px] px-1.5 py-0.5 rounded border border-amber-700 text-amber-400 mono">inference proposal</span>
+        {% endif %}
+        {% if dirty %}
+            <span class="text-[11px] px-1.5 py-0.5 rounded border border-[#4da3ff] text-[#4da3ff] mono">draft has unsaved changes</span>
+        {% endif %}
+        <span class="text-[11px] mono text-slate-500">· {{ columns.len() }} column(s) · {{ rules_count }} rule(s) in draft</span>
+
+        <div class="ml-auto flex flex-wrap items-center gap-2">
+            <form hx-post="/w/{{ slug }}/e/{{ entity }}/schema/infer"
+                  hx-target="#schema-panel" hx-swap="outerHTML">
+                <button class="btn rounded-md px-3 py-1.5 text-xs" type="submit">
+                    Re-infer <span class="spinner">…</span>
+                </button>
+            </form>
+            <form hx-post="/w/{{ slug }}/e/{{ entity }}/schema/column"
+                  hx-target="#schema-panel" hx-swap="outerHTML">
+                <input type="hidden" name="action" value="add">
+                <button class="btn rounded-md px-3 py-1.5 text-xs" type="submit">Add column</button>
+            </form>
+            <form hx-post="/w/{{ slug }}/e/{{ entity }}/schema/confirm"
+                  hx-target="#schema-panel" hx-swap="outerHTML">
+                <button class="btn rounded-md px-3 py-1.5 text-xs border-emerald-700 text-emerald-300" type="submit">
+                    Confirm schema <span class="spinner">…</span>
+                </button>
+            </form>
+        </div>
+    </div>
+
+    {% if !confirmed %}
+        <p class="text-[11px] text-amber-300">
+            This is an inference proposal — nothing has been saved yet. Confirm the schema to freeze the
+            contract in <span class="mono">schemas/{{ entity }}.toml</span> and unlock the Rules stage.
+        </p>
+    {% endif %}
+
+    {% if has_notice %}
+        <div class="card rounded-lg border-l-4 border-l-emerald-600 p-3 text-xs mono text-emerald-300">{{ notice }}</div>
+    {% endif %}
+    {% if has_error %}
+        <div class="card rounded-lg border-l-4 border-l-red-500 p-3 text-xs mono text-red-300">{{ error }}</div>
+    {% endif %}
+
+    {% if columns.is_empty() %}
+        <p class="text-sm text-slate-500 italic">
+            No columns: inference found nothing readable. Check the files on the Files tab.
+        </p>
+    {% else %}
+        <table class="w-full text-xs">
+            <thead class="text-[11px] uppercase tracking-wider text-slate-500">
+                <tr>
+                    <th class="text-left py-1 font-medium w-8">#</th>
+                    <th class="text-left font-medium">Column</th>
+                    <th class="text-left font-medium w-48">Type</th>
+                    <th class="text-right font-medium w-24">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for column in columns %}
+                    <tr class="border-t border-slate-800">
+                        <td class="py-1.5 mono text-slate-500">{{ loop.index }}</td>
+                        <td class="py-1.5">
+                            {# Переименование — inline-форма: имя меняется прямо в таблице. #}
+                            <form class="flex items-center gap-2"
+                                  hx-post="/w/{{ slug }}/e/{{ entity }}/schema/column"
+                                  hx-target="#schema-panel" hx-swap="outerHTML">
+                                <input type="hidden" name="action" value="rename">
+                                <input type="hidden" name="index" value="{{ loop.index0 }}">
+                                <input class="input mono rounded-md px-2 py-1 text-xs w-full"
+                                       type="text" name="name" value="{{ column.name }}" required>
+                                <button class="btn rounded-md px-2 py-1 text-[11px] whitespace-nowrap" type="submit">Rename</button>
+                            </form>
+                        </td>
+                        <td class="py-1.5">
+                            {# Тип — select из меток, которые понимает ядро; смена сразу
+                               уходит на сервер как htmx-фрагмент. #}
+                            <form hx-post="/w/{{ slug }}/e/{{ entity }}/schema/column"
+                                  hx-target="#schema-panel" hx-swap="outerHTML">
+                                <input type="hidden" name="action" value="type">
+                                <input type="hidden" name="index" value="{{ loop.index0 }}">
+                                <select class="input mono rounded-md px-2 py-1 text-xs w-full"
+                                        name="dtype"
+                                        hx-post="/w/{{ slug }}/e/{{ entity }}/schema/column"
+                                        hx-include="closest form"
+                                        hx-target="#schema-panel" hx-swap="outerHTML"
+                                        hx-trigger="change">
+                                    {% for option in column.dtype_options %}
+                                        {% if option.selected %}
+                                            <option value="{{ option.value }}" selected>{{ option.value }}</option>
+                                        {% else %}
+                                            <option value="{{ option.value }}">{{ option.value }}</option>
+                                        {% endif %}
+                                    {% endfor %}
+                                </select>
+                            </form>
+                        </td>
+                        <td class="py-1.5 text-right">
+                            <form hx-post="/w/{{ slug }}/e/{{ entity }}/schema/column"
+                                  hx-target="#schema-panel" hx-swap="outerHTML">
+                                <input type="hidden" name="action" value="delete">
+                                <input type="hidden" name="index" value="{{ loop.index0 }}">
+                                <button class="btn rounded-md px-2 py-1 text-[11px]" type="submit" title="Remove column">✕</button>
+                            </form>
+                        </td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    {% endif %}
+
+    <p class="text-[11px] text-slate-500">
+        Types are the engine's labels (i8…i64, u8…u64, f32/f64, bool, str). Nullability is not part of the
+        schema model — empty values are handled by rules (Rules tab).
+    </p>
+</div>
