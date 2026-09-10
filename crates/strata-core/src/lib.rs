@@ -47,9 +47,9 @@ pub use folder::{
 /// [`schema::schema_from_folder`]) — милестон «Schemas» из M1b.
 pub mod schema;
 pub use schema::{
-    FolderSchema, SchemaColumn, SchemaConflict, SchemaProposal, schema_from_file,
-    schema_from_folder, source_to_parquet_typed, stage_folder_with_schema,
-    stage_folder_with_schema_progress,
+    FolderSchema, SchemaColumn, SchemaConflict, SchemaProposal, cast_frame_to_schema,
+    schema_from_file, schema_from_folder, source_to_parquet_typed, stage_folder_with_schema,
+    stage_folder_with_schema_progress, types_compatible,
 };
 
 /// Персистентность проекта: `project.toml`, сохранённые схемы, хелперы токенов.
@@ -68,6 +68,20 @@ pub mod excel;
 pub use excel::read_excel_frame;
 
 /// Модель воркспейса (M1c): конфиг + привязки + scan roots + кандидаты в сущности.
+/// Движок правил качества: бизнес-проверки, карантин, разбиение кадра.
+pub mod quality;
+pub use quality::{
+    ColumnRule, QualityOutcome, RowViolation, RuleKind, RuleStats, Severity, evaluate,
+    quarantine_row_indices, split_frame,
+};
+
+/// Прогон сущности: ODS + карантин + манифест + логи.
+pub mod run;
+pub use run::{
+    FileRun, PartInfo, QuarantineRow, RuleSummary, RunManifest, RunOutcome, list_runs,
+    read_manifest, read_quarantine, run_entity,
+};
+
 pub mod workspace;
 pub use workspace::{
     Binding, WorkspaceConfig, candidate_entity_name, create_workspace, data_dir,
@@ -115,6 +129,14 @@ pub enum StrataError {
     /// Схема требует тип колонки, который движок не умеет строить.
     #[error("unsupported schema type: {0}")]
     SchemaType(String),
+
+    /// Ошибка прогона: манифест, лог, запись артефактов.
+    #[error("run error: {0}")]
+    Run(String),
+
+    /// Правило качества сформулировано некорректно (плохой regex, нет колонки).
+    #[error("rule error: {0}")]
+    Rule(String),
 }
 
 /// Удобный алиас, используемый каждой публичной функцией крейта.
@@ -442,6 +464,20 @@ fn sanitize_partition_key(value: &str) -> String {
     } else {
         sanitized
     }
+}
+
+/// Прочитать любой поддерживаемый файл в кадр `DataFrame`.
+///
+/// Публичная обёртка над внутренним `open_any` для слоёв, которым нужны сами
+/// данные, а не превью: движок правил (`crate::quality`) и пайплайн прогона
+/// (`crate::run`). `max_rows: None` — весь файл, `Some(n)` — первые n строк.
+pub fn read_frame(
+    path: &Path,
+    options: ReaderOptions,
+    max_rows: Option<usize>,
+) -> Result<DataFrame> {
+    let (frame, _source) = open_any(path, options, max_rows)?;
+    Ok(frame)
 }
 
 /// Открывает любой поддерживаемый файл в материализованный фрейм плюс происхождение.

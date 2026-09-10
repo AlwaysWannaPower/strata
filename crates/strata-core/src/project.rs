@@ -53,7 +53,7 @@ pub struct ColumnDef {
 /// Сохранённая схема: исходный файл + подтверждённые колонки + опции читалки.
 ///
 /// `encoding` / `delimiter` хранят канонические токены (`"auto"`, когда не заданы).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SchemaFile {
     /// Версия формата файла схемы.
     pub format: u32,
@@ -67,6 +67,10 @@ pub struct SchemaFile {
     pub delimiter: String,
     /// Подтверждённые колонки по порядку.
     pub columns: Vec<ColumnDef>,
+    /// Правила качества (бизнес-проверки) этой сущности. Поле добавлено позже,
+    /// поэтому старые файлы схем читаются с пустым списком правил.
+    #[serde(default)]
+    pub quality: Vec<crate::quality::ColumnRule>,
     /// Когда эта схема была сохранена (UTC ISO-8601, для справки).
     pub saved_utc: String,
 }
@@ -81,6 +85,7 @@ impl SchemaFile {
             encoding: encoding_token(options.encoding).to_string(),
             delimiter: delimiter_token(options.delimiter).to_string(),
             columns,
+            quality: Vec::new(),
             saved_utc: now_utc(),
         }
     }

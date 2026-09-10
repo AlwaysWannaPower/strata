@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use polars::prelude::{DataType, LazyFrame, ParquetWriter};
+use polars::prelude::{DataFrame, DataType, LazyFrame, ParquetWriter};
 
 use crate::folder::{FileMeta, FolderReport, scan_folder};
 use crate::{
@@ -395,7 +395,7 @@ fn dtype_from_label(label: &str) -> Option<DataType> {
 /// Всё остальное (строка ↔ число, дата ↔ строка, …) — это *конвертация*, а не
 /// расширение, и принадлежит слою валидации/ODS, поэтому остаётся
 /// несоответствием.
-fn types_compatible(expected: &str, actual: &str) -> bool {
+pub fn types_compatible(expected: &str, actual: &str) -> bool {
     if expected == actual {
         return true;
     }
@@ -428,6 +428,25 @@ fn numeric_rank(label: &str) -> Option<u8> {
 /// лишь *совместим* (расширение, см. [`types_compatible`]), к объявленному типу,
 /// затем пишет часть. Несовместимые типы сюда никогда не доходят — их отсекают
 /// раньше с понятной причиной.
+/// Привести кадр к типам подтверждённой схемы (числовое расширение и т.п.).
+///
+/// Колонки, тип которых уже совпадает, не трогаем; несовместимые типы сюда не
+/// попадают — их отсекает проверка схемы до записи.
+pub fn cast_frame_to_schema(frame: &DataFrame, columns: &[ColumnDef]) -> crate::Result<DataFrame> {
+    let mut out = frame.clone();
+    for column in columns {
+        let expected = dtype_from_label(&column.dtype).ok_or_else(|| {
+            crate::StrataError::SchemaType(format!("{} (колонка '{}')", column.dtype, column.name))
+        })?;
+        let actual = out.column(&column.name)?;
+        if actual.dtype() != &expected {
+            let casted = actual.cast(&expected)?;
+            out.with_column(casted)?;
+        }
+    }
+    Ok(out)
+}
+
 pub fn source_to_parquet_typed(
     path: &Path,
     part_path: &Path,
@@ -621,6 +640,7 @@ mod tests {
             has_header: true,
             encoding: "auto".to_string(),
             delimiter: "auto".to_string(),
+            quality: Vec::new(),
             columns: vec![
                 ColumnDef {
                     name: "id".into(),

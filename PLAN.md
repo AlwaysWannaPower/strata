@@ -257,9 +257,28 @@ Parquet Dataset → итоги**. Всё сквозь UI.
 
 ---
 
-### M3 — Data Quality и Quarantine (самый сложный модуль)
+### M3 — Data Quality и Quarantine (движок готов, UI — в M4/UI-3..4)
 
-**Цель:** правила качества и **карантин проблемных строк** — то, что делает продукт «настоящим».
+**Статус:** ядро сделано и покрыто тестами:
+- `strata-core/src/quality.rs` — модель правил (`not_null`, `unique`, `range`,
+  `regex`, `date_format`, `allowed_values`), строгость `error` (строка → карантин)
+  и `warning` (строка проходит, но считается), построчная проверка по `AnyValue`
+  (простота вместо векторных выражений — см. комментарии в модуле),
+  `split_frame` для разделения кадра;
+- `strata-core/src/run.rs` — прогон сущности в **неизменяемую** директорию
+  `data/<entity>/runs/<run_id>/`: `ods/*.parquet`, `quarantine/*.parquet`,
+  `violations.jsonl`, `run.jsonl`, `manifest.json` + указатель `latest.json`
+  (обновляется только при отсутствии ошибок уровня error);
+- `strata_core::api` — `entity_schema_view`, `save_entity_schema`,
+  `validate_entity` (проверка на образце), `run_entity_now`, `entity_runs`,
+  `entity_run_manifest`, `entity_quarantine`;
+- правила хранятся в `*.schema.toml` (`[[quality]]`), старые схемы читаются.
+
+**Осталось по этапу:** UI стадий Rules/ODS (фазы UI-3, UI-4 в `docs/design-ui-pipeline.md`),
+пополнение `examples/dirty/` фикстурами, `docs/guide-3-quality.md`.
+
+**Историческая цель этапа:** правила качества и карантин проблемных строк — то, что делает
+продукт «настоящим» (см. `docs/design-ui-pipeline.md` §6–7).
 
 **Сценарий:** после подтверждения схемы прогон проходит валидацию:
 - правила: `NOT NULL`, `UNIQUE`, `RANGE` (напр. `amount >= 0`), `REGEX`, `DATE FORMAT`, `TYPE`;

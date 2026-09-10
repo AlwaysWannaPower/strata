@@ -27,10 +27,13 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::quality::{ColumnRule, RuleStats};
+use crate::run::{QuarantineRow, RunManifest, RunOutcome};
 use crate::{
     ColumnDef, FolderReport, ReaderOptions, SchemaFile, WorkspaceConfig, candidate_entity_name,
-    create_workspace, data_dir, folder_to_parquet, list_entity_candidates, list_parts,
-    open_workspace, save_schema, scan_folder, schema_from_folder, upsert_binding,
+    create_workspace, data_dir, delimiter_from_token, encoding_from_token, folder_to_parquet,
+    list_entity_candidates, list_parts, open_workspace, save_schema, scan_folder,
+    schema_from_folder, upsert_binding,
 };
 
 // ---------------------------------------------------------------------------
@@ -426,6 +429,313 @@ fn slugify(name: &str) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Схема, правила и проверка на образце (стадии Schema и Rules)
+// ---------------------------------------------------------------------------
+
+/// Текущий контракт сущности: колонки, правила и опции чтения.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntitySchemaView {
+    /// Подтверждена ли схема (есть ли `schemas/<entity>.toml`).
+    pub confirmed: bool,
+    /// Колонки по порядку.
+    pub columns: Vec<ColumnDef>,
+    /// Правила качества.
+    pub rules: Vec<ColumnRule>,
+    /// Опции чтения, сохранённые в схеме.
+    pub options: ReaderOptions,
+    /// Папка-источник, привязанная к сущности.
+    pub folder: PathBuf,
+}
+
+/// Прочитать контракт сущности: подтверждённую схему или предложение инференса.
+pub fn entity_schema_view(workspace_dir: &Path, entity: &str) -> ApiResult<EntitySchemaView> {
+    let config = load_config(workspace_dir)?;
+    let binding = config
+        .bindings
+        .iter()
+        .find(|b| b.entity == entity)
+        .ok_or_else(|| ApiError::new(format!("неизвестная сущность '{entity}'")))?;
+    let folder = PathBuf::from(&binding.folder);
+
+    if let Ok(schema) = crate::load_schema(workspace_dir, &format!("{entity}.toml")) {
+        return Ok(EntitySchemaView {
+            confirmed: true,
+            columns: schema.columns,
+            rules: schema.quality,
+            options: ReaderOptions {
+                encoding: encoding_from_token(&schema.encoding),
+                delimiter: delimiter_from_token(&schema.delimiter),
+                has_header: schema.has_header,
+            },
+            folder,
+        });
+    }
+
+    let report = schema_from_folder(&folder, ReaderOptions::default())
+        .map_err(|e| err("не удалось вывести схему", e))?;
+    Ok(EntitySchemaView {
+        confirmed: false,
+        columns: report
+            .columns
+            .into_iter()
+            .map(|c| ColumnDef {
+                name: c.name,
+                dtype: c.dtype,
+            })
+            .collect(),
+        rules: Vec::new(),
+        options: ReaderOptions::default(),
+        folder,
+    })
+}
+
+/// Сохранить подтверждённую схему: колонки + правила + опции чтения.
+pub fn save_entity_schema(
+    workspace_dir: &Path,
+    entity: &str,
+    folder: &Path,
+    columns: Vec<ColumnDef>,
+    rules: Vec<ColumnRule>,
+    options: ReaderOptions,
+) -> ApiResult<()> {
+    let entity = validate_entity_name(entity)?;
+    if columns.is_empty() {
+        return Err(ApiError::new("схема без колонок не имеет смысла"));
+    }
+
+    let mut schema = SchemaFile::new(folder.to_path_buf(), options, columns);
+    schema.quality = rules;
+
+    let saved =
+        save_schema(workspace_dir, &schema).map_err(|e| err("не удалось сохранить схему", e))?;
+    let wanted = format!("{entity}.toml");
+    if saved != wanted {
+        let from = workspace_dir.join("schemas").join(&saved);
+        let to = workspace_dir.join("schemas").join(&wanted);
+        std::fs::rename(&from, &to).map_err(|e| err("не удалось переименовать схему", e))?;
+    }
+    Ok(())
+}
+
+/// Результат проверки одного файла на образце.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileSampleCheck {
+    /// Имя файла.
+    pub name: String,
+    /// Сколько строк проверено.
+    pub rows_checked: usize,
+    /// Проблема схемы (тип/набор колонок), если есть.
+    pub column_issue: Option<String>,
+    /// Статистика по правилам.
+    pub rule_stats: Vec<RuleStats>,
+    /// Строк с нарушениями уровня error.
+    pub rows_with_errors: usize,
+    /// Строк с предупреждениями.
+    pub rows_with_warnings: usize,
+}
+
+/// Отчёт «проверить на образце».
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValidationReport {
+    /// По файлам.
+    pub files: Vec<FileSampleCheck>,
+    /// Сводка по правилам (суммарно).
+    pub rules: Vec<RuleStats>,
+    /// Всего проверено строк.
+    pub rows_checked: usize,
+    /// Строк уйдёт в карантин.
+    pub rows_with_errors: usize,
+    /// Строк с предупреждениями.
+    pub rows_with_warnings: usize,
+}
+
+/// Проверить файлы сущности на образце: схема + правила. Ничего не пишет.
+pub fn validate_entity(
+    workspace_dir: &Path,
+    entity: &str,
+    sample_rows: usize,
+) -> ApiResult<ValidationReport> {
+    let view = entity_schema_view(workspace_dir, entity)?;
+    let options = view.options;
+    let scan = scan_folder(&view.folder).map_err(|e| err("не удалось прочитать папку", e))?;
+
+    let mut files = Vec::new();
+    let mut totals: Vec<RuleStats> = Vec::new();
+    let mut rows_checked = 0usize;
+    let mut rows_with_errors = 0usize;
+    let mut rows_with_warnings = 0usize;
+
+    for meta in &scan.files {
+        if meta.kind == "Other" {
+            continue;
+        }
+        let path = view.folder.join(&meta.name);
+        let frame = match crate::read_frame(&path, options, Some(sample_rows)) {
+            Ok(frame) => frame,
+            Err(error) => {
+                files.push(FileSampleCheck {
+                    name: meta.name.clone(),
+                    rows_checked: 0,
+                    column_issue: Some(format!("не читается: {error}")),
+                    rule_stats: Vec::new(),
+                    rows_with_errors: 0,
+                    rows_with_warnings: 0,
+                });
+                continue;
+            }
+        };
+
+        let column_issue = check_columns(&view.columns, &frame);
+        let frame = crate::cast_frame_to_schema(&frame, &view.columns).unwrap_or(frame);
+        let outcome =
+            crate::quality::evaluate(&frame, &view.rules, 5).map_err(|e| err("правила", e))?;
+
+        let error_rows = crate::quality::quarantine_row_indices(&outcome).len();
+        rows_checked += frame.height();
+        rows_with_errors += error_rows;
+        rows_with_warnings += outcome.warning_rows;
+        merge_rule_stats(&mut totals, &outcome.stats);
+
+        files.push(FileSampleCheck {
+            name: meta.name.clone(),
+            rows_checked: frame.height(),
+            column_issue,
+            rule_stats: outcome.stats,
+            rows_with_errors: error_rows,
+            rows_with_warnings: outcome.warning_rows,
+        });
+    }
+
+    Ok(ValidationReport {
+        files,
+        rules: totals,
+        rows_checked,
+        rows_with_errors,
+        rows_with_warnings,
+    })
+}
+
+/// Сравнить колонки файла с подтверждённой схемой.
+fn check_columns(expected: &[ColumnDef], frame: &polars::prelude::DataFrame) -> Option<String> {
+    let actual: Vec<(String, String)> = frame
+        .columns()
+        .iter()
+        .map(|c| (c.name().to_string(), c.dtype().to_string()))
+        .collect();
+    if expected.len() != actual.len() {
+        return Some(format!(
+            "{} колонок в схеме, {} в файле",
+            expected.len(),
+            actual.len()
+        ));
+    }
+    for (expected, (name, dtype)) in expected.iter().zip(actual) {
+        if expected.name != name {
+            return Some(format!(
+                "ожидали колонку '{}', в файле '{name}'",
+                expected.name
+            ));
+        }
+        if !crate::types_compatible(&expected.dtype, &dtype) {
+            return Some(format!(
+                "'{}': ожидали тип {}, в файле {dtype}",
+                expected.name, expected.dtype
+            ));
+        }
+    }
+    None
+}
+
+/// Сложить статистику правил из разных файлов (ключ: колонка + правило).
+fn merge_rule_stats(totals: &mut Vec<RuleStats>, stats: &[RuleStats]) {
+    for stat in stats {
+        match totals
+            .iter_mut()
+            .find(|t| t.column == stat.column && t.rule == stat.rule)
+        {
+            Some(existing) => existing.violations += stat.violations,
+            None => totals.push(stat.clone()),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Прогон и карантин (стадия ODS)
+// ---------------------------------------------------------------------------
+
+/// Запустить прогон сущности: ODS + карантин + манифест + логи.
+pub fn run_entity_now<F>(
+    workspace_dir: &Path,
+    entity: &str,
+    mut on_progress: F,
+) -> ApiResult<RunOutcome>
+where
+    F: FnMut(usize, usize),
+{
+    let config = load_config(workspace_dir)?;
+    let binding = config
+        .bindings
+        .iter()
+        .find(|b| b.entity == entity)
+        .ok_or_else(|| ApiError::new(format!("неизвестная сущность '{entity}'")))?;
+    let folder = PathBuf::from(&binding.folder);
+
+    let schema = crate::load_schema(workspace_dir, &format!("{entity}.toml")).map_err(|_| {
+        ApiError::new(format!(
+            "схема '{entity}' не подтверждена — сначала подтвердите схему"
+        ))
+    })?;
+
+    let options = ReaderOptions {
+        encoding: encoding_from_token(&schema.encoding),
+        delimiter: delimiter_from_token(&schema.delimiter),
+        has_header: schema.has_header,
+    };
+    let dataset_dir = data_dir(workspace_dir, &config).join(entity);
+
+    crate::run_entity(
+        &folder,
+        &dataset_dir,
+        entity,
+        &schema,
+        options,
+        &mut |done, total| on_progress(done, total),
+    )
+    .map_err(|e| err("прогон не удался", e))
+}
+
+/// Прогоны сущности (свежие сверху).
+pub fn entity_runs(workspace_dir: &Path, entity: &str) -> ApiResult<Vec<RunManifest>> {
+    let config = load_config(workspace_dir)?;
+    let dataset_dir = data_dir(workspace_dir, &config).join(entity);
+    crate::list_runs(&dataset_dir).map_err(|e| err("не удалось прочитать прогоны", e))
+}
+
+/// Манифест конкретного прогона.
+pub fn entity_run_manifest(
+    workspace_dir: &Path,
+    entity: &str,
+    run_id: &str,
+) -> ApiResult<RunManifest> {
+    let config = load_config(workspace_dir)?;
+    let dataset_dir = data_dir(workspace_dir, &config).join(entity);
+    crate::read_manifest(&dataset_dir, run_id).map_err(|e| err("не удалось прочитать манифест", e))
+}
+
+/// Строки карантина конкретного прогона (для таблицы в UI).
+pub fn entity_quarantine(
+    workspace_dir: &Path,
+    entity: &str,
+    run_id: &str,
+    limit: usize,
+) -> ApiResult<Vec<QuarantineRow>> {
+    let config = load_config(workspace_dir)?;
+    let dataset_dir = data_dir(workspace_dir, &config).join(entity);
+    crate::read_quarantine(&dataset_dir, run_id, limit)
+        .map_err(|e| err("не удалось прочитать карантин", e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,5 +857,127 @@ mod tests {
         assert_eq!(slugify("Продажи 2026"), "продажи-2026");
         assert_eq!(slugify("  a  b  "), "a-b");
         assert_eq!(slugify("!!!"), "workspace");
+    }
+
+    #[test]
+    fn full_pipeline_schema_rules_run_and_quarantine() {
+        use crate::quality::{ColumnRule, RuleKind, Severity};
+
+        let root = temp_dir("pipeline_root");
+        let ws = create_workspace_in(&root, "pipeline").expect("воркспейс");
+        let sources = temp_dir("pipeline_sources");
+        let sales = sources.join("sales");
+        std::fs::create_dir_all(&sales).expect("папка сущности");
+
+        // Две строки с нарушениями: отрицательный amount и пустой customer, плюс дубль id.
+        write_csv(
+            &sales.join("a.csv"),
+            "id,amount,customer\n1,12.5,Alpha\n2,-3.0,Beta\n3,7.0,Gamma\n",
+        );
+        write_csv(
+            &sales.join("b.csv"),
+            "id,amount,customer\n4,9.5,Delta\n4,1.0,\n",
+        );
+
+        // Привязываем папку к сущности (как это делает confirm_entity, но схему задаём сами).
+        let mut config = open_workspace(&ws.dir).expect("конфиг").expect("есть");
+        upsert_binding(&ws.dir, &mut config, "sales".into(), sales.clone()).expect("привязка");
+
+        // Контракт: колонки + правила (error → карантин, warning → пометка).
+        save_entity_schema(
+            &ws.dir,
+            "sales",
+            &sales,
+            vec![
+                crate::ColumnDef {
+                    name: "id".into(),
+                    dtype: "i64".into(),
+                },
+                crate::ColumnDef {
+                    name: "amount".into(),
+                    dtype: "f64".into(),
+                },
+                crate::ColumnDef {
+                    name: "customer".into(),
+                    dtype: "str".into(),
+                },
+            ],
+            vec![
+                ColumnRule {
+                    column: "id".into(),
+                    severity: Severity::Error,
+                    kind: RuleKind::Unique,
+                },
+                ColumnRule {
+                    column: "amount".into(),
+                    severity: Severity::Error,
+                    kind: RuleKind::Range {
+                        min: Some(0.0),
+                        max: None,
+                    },
+                },
+                ColumnRule {
+                    column: "customer".into(),
+                    severity: Severity::Warning,
+                    kind: RuleKind::NotNull,
+                },
+            ],
+            crate::ReaderOptions::default(),
+        )
+        .expect("схема сохранена");
+
+        // Схема теперь подтверждена, и предложение совпадает с сохранённым.
+        let view = entity_schema_view(&ws.dir, "sales").expect("контракт");
+        assert!(view.confirmed);
+        assert_eq!(view.columns.len(), 3);
+        assert_eq!(view.rules.len(), 3);
+
+        // Проверка на образце видит нарушения.
+        let report = validate_entity(&ws.dir, "sales", 100).expect("проверка");
+        assert_eq!(report.files.len(), 2);
+        assert!(report.rows_with_errors > 0, "ожидали строки-нарушители");
+        assert!(
+            report.rows_with_warnings > 0,
+            "ожидали предупреждение по customer"
+        );
+
+        // Прогон: ODS + карантин + манифест + логи.
+        let outcome = run_entity_now(&ws.dir, "sales", |_, _| {}).expect("прогон");
+        let manifest = &outcome.manifest;
+        assert_eq!(manifest.entity, "sales");
+        assert_eq!(manifest.rows_read, 5);
+        assert_eq!(manifest.rows_valid + manifest.rows_quarantine, 5);
+        assert_eq!(
+            manifest.rows_quarantine, 3,
+            "строки 2 (amount), 4 и 5 (id/customer)"
+        );
+        assert!(manifest.has_errors);
+        // a.csv даёт часть ODS (2 строки прошли), b.csv целиком ушёл в карантин
+        // (дубликат id=4 в обеих строках) — поэтому частей ODS ровно одна,
+        // а частей карантина две.
+        assert_eq!(manifest.parts.len(), 1);
+        assert_eq!(manifest.quarantine_parts.len(), 2);
+        assert!(!manifest.schema_hash.is_empty());
+
+        // Артефакты на диске.
+        assert!(outcome.run_dir.join("manifest.json").exists());
+        assert!(outcome.run_dir.join("run.jsonl").exists());
+        assert!(outcome.run_dir.join("violations.jsonl").exists());
+        // При ошибках указатель «последний удачный» не обновляется.
+        let dataset_dir = ws.data_dir.join("sales");
+        assert!(!dataset_dir.join("latest.json").exists());
+
+        // Список прогонов и карантин читаются через API.
+        let runs = entity_runs(&ws.dir, "sales").expect("прогоны");
+        assert_eq!(runs.len(), 1);
+        let quarantine =
+            entity_quarantine(&ws.dir, "sales", &manifest.run_id, 10).expect("карантин");
+        assert!(!quarantine.is_empty());
+        assert!(quarantine.iter().any(|row| row.column == "amount"));
+        let loaded = entity_run_manifest(&ws.dir, "sales", &manifest.run_id).expect("манифест");
+        assert_eq!(loaded.run_id, manifest.run_id);
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(sources);
     }
 }
