@@ -37,14 +37,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+mod auth;
+
 use askama::Template;
-use axum::extract::{Path as AxumPath, State};
+use axum::extract::{Path as AxumPath, Request, State};
 use axum::http::StatusCode;
+use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Form, Router};
 use serde::Deserialize;
+use sqlx::SqlitePool;
 use sysinfo::{Pid, ProcessesToUpdate, System};
+use tower_sessions::{MemoryStore, Session, SessionManagerLayer};
 
 use strata_core::api;
 
@@ -60,6 +65,8 @@ struct AppState {
     workspace_root: PathBuf,
     /// Folders the service is allowed to read data from (allowlist).
     source_roots: Vec<PathBuf>,
+    /// Users database (SQLite; see `auth.rs`).
+    db: SqlitePool,
     /// Process start time, for the "uptime" chip.
     started: Instant,
     /// Background staging jobs: id → (entity, state). Entries are removed as
@@ -78,10 +85,12 @@ struct AppState {
 impl AppState {
     /// Build state from environment variables.
     ///
-    /// * `STRATA_WORKSPACE_ROOT` — workspace storage (default `./workspaces`)
+    /// * `STRATA_WORKSPACE_ROOT` — workspace storage (default `./workspaces`);
+    ///   each user gets `workspaces/<user_id>/`.
     /// * `STRATA_SOURCE_ROOTS` — `:`-separated allowlist (default: workspace root)
     /// * `STRATA_ADDR` — listen address (default `0.0.0.0:8080`)
-    fn from_env() -> (Self, SocketAddr) {
+    /// * `STRATA_DB_URL` — SQLite URL (default `sqlite://<root>/strata.db?mode=rwc`)
+    async fn from_env() -> Result<(Self, SocketAddr), Box<dyn std::error::Error>> {
         let workspace_root = std::env::var("STRATA_WORKSPACE_ROOT")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("./workspaces"));
@@ -93,21 +102,39 @@ impl AppState {
             .parse()
             .unwrap_or_else(|_| "0.0.0.0:8080".parse().expect("valid fallback addr"));
 
-        (
+        // `mode=rwc` = create the file if missing (sqlx default is read-only).
+        let db_url = std::env::var("STRATA_DB_URL").unwrap_or_else(|_| {
+            format!("sqlite://{}/strata.db?mode=rwc", workspace_root.display())
+        });
+        std::fs::create_dir_all(&workspace_root)?;
+        let db = SqlitePool::connect(&db_url).await?;
+        auth::init_db(&db).await.map_err(|e| e.0)?;
+
+        Ok((
             AppState {
                 workspace_root,
                 source_roots,
+                db,
                 started: Instant::now(),
                 jobs: Arc::new(Mutex::new(HashMap::new())),
                 job_seq: Arc::new(AtomicU64::new(1)),
                 system: Arc::new(Mutex::new(System::new())),
             },
             addr,
-        )
+        ))
+    }
+
+    /// Workspace root **of one user**: each account owns `workspaces/<user_id>/`.
+    ///
+    /// Multi-tenancy here is deliberately blunt — a separate directory per user
+    /// id — because the engine works with paths, and a path jail is the thing
+    /// that actually keeps tenants apart.
+    fn user_root(&self, user_id: i64) -> PathBuf {
+        self.workspace_root.join(user_id.to_string())
     }
 
     /// Resolve a workspace slug to its directory, refusing path escapes.
-    fn workspace_dir(&self, slug: &str) -> Result<PathBuf, WebError> {
+    fn workspace_dir(&self, user_id: i64, slug: &str) -> Result<PathBuf, WebError> {
         // Slugs come from the URL; validate before touching the file system.
         let ok = !slug.is_empty()
             && slug.len() <= 64
@@ -117,7 +144,7 @@ impl AppState {
         if !ok || slug.contains("..") {
             return Err(WebError::bad_request("invalid workspace name"));
         }
-        Ok(self.workspace_root.join(slug))
+        Ok(self.user_root(user_id).join(slug))
     }
 }
 
@@ -153,6 +180,14 @@ impl WebError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: message.into(),
         }
+    }
+}
+
+impl From<auth::AuthError> for WebError {
+    fn from(error: auth::AuthError) -> Self {
+        // Database/validation problems are user-facing here (bad input, taken
+        // username); real outages surface as 500 in the logs.
+        WebError::bad_request(error.0)
     }
 }
 
@@ -233,8 +268,8 @@ fn ensure_allowed(state: &AppState, candidate: &Path) -> WebResult<PathBuf> {
 ///
 /// Missing workspace → 404 (a route-level concern), while *invalid* slugs are
 /// rejected earlier by [`AppState::workspace_dir`].
-fn require_workspace(state: &AppState, slug: &str) -> WebResult<PathBuf> {
-    let dir = state.workspace_dir(slug)?;
+fn require_workspace(state: &AppState, user_id: i64, slug: &str) -> WebResult<PathBuf> {
+    let dir = state.workspace_dir(user_id, slug)?;
     if !dir.join("workspace.toml").exists() {
         return Err(WebError::not_found(format!("workspace '{slug}' not found")));
     }
@@ -257,6 +292,8 @@ struct WsRow {
 #[derive(Template)]
 #[template(path = "index.html")]
 struct IndexTemplate {
+    /// `Some(username)` when signed in; `None` shows the sign-in call to action.
+    user: Option<String>,
     workspaces: Vec<WsRow>,
     workspace_root: String,
     source_roots: Vec<String>,
@@ -289,6 +326,20 @@ struct CandidatesFragment {
     candidates: Vec<api::CandidateInfo>,
 }
 
+/// Login page.
+#[derive(Template)]
+#[template(path = "login.html")]
+struct LoginTemplate {
+    error: Option<String>,
+}
+
+/// Registration page.
+#[derive(Template)]
+#[template(path = "register.html")]
+struct RegisterTemplate {
+    error: Option<String>,
+}
+
 /// Fragment: result of a staging run.
 #[derive(Template)]
 #[template(path = "fragments/stage.html")]
@@ -319,6 +370,12 @@ struct ScanForm {
 }
 
 #[derive(Deserialize)]
+struct CredentialsForm {
+    username: String,
+    password: String,
+}
+
+#[derive(Deserialize)]
 struct EntityForm {
     entity: String,
     folder: String,
@@ -329,8 +386,13 @@ struct EntityForm {
 // ---------------------------------------------------------------------------
 
 /// `GET /` — the workspace list.
-async fn index(State(state): State<AppState>) -> WebResult<Html<String>> {
-    let workspaces = api::list_workspaces(&state.workspace_root)?
+async fn index(State(state): State<AppState>, session: Session) -> WebResult<Html<String>> {
+    let user = auth::current_user(&state.db, &session).await;
+    let root = match &user {
+        Some(user) => state.user_root(user.id),
+        None => state.workspace_root.clone(),
+    };
+    let workspaces = api::list_workspaces(&root)?
         .into_iter()
         .map(|ws| WsRow {
             slug: ws
@@ -343,8 +405,9 @@ async fn index(State(state): State<AppState>) -> WebResult<Html<String>> {
         })
         .collect();
     let page = IndexTemplate {
+        user: user.map(|u| u.username),
         workspaces,
-        workspace_root: state.workspace_root.display().to_string(),
+        workspace_root: root.display().to_string(),
         source_roots: state
             .source_roots
             .iter()
@@ -357,9 +420,13 @@ async fn index(State(state): State<AppState>) -> WebResult<Html<String>> {
 /// `POST /workspaces` — create a workspace, then redirect to its hub.
 async fn create_workspace(
     State(state): State<AppState>,
+    session: Session,
     Form(form): Form<CreateWorkspaceForm>,
 ) -> WebResult<Redirect> {
-    let created = api::create_workspace_in(&state.workspace_root, &form.name)?;
+    let user_id = auth::current_user_id(&session)
+        .await
+        .ok_or_else(|| WebError::bad_request("not signed in"))?;
+    let created = api::create_workspace_in(&state.user_root(user_id), &form.name)?;
     let slug = created
         .dir
         .file_name()
@@ -371,9 +438,11 @@ async fn create_workspace(
 /// `GET /w/{slug}` — the pipeline hub of one workspace.
 async fn hub(
     State(state): State<AppState>,
+    session: Session,
     AxumPath(slug): AxumPath<String>,
 ) -> WebResult<Html<String>> {
-    let dir = require_workspace(&state, &slug)?;
+    let user_id = signed_in(&session).await?;
+    let dir = require_workspace(&state, user_id, &slug)?;
     let info = api::open_workspace_at(&dir)?;
     let page = HubTemplate {
         slug,
@@ -391,11 +460,13 @@ async fn hub(
 /// (proposal stage — the user still has to confirm each entity).
 async fn scan_root(
     State(state): State<AppState>,
+    session: Session,
     AxumPath(slug): AxumPath<String>,
     Form(form): Form<ScanForm>,
 ) -> WebResult<Html<String>> {
     // The workspace must exist; the scan itself only needs the root path.
-    let _dir = require_workspace(&state, &slug)?;
+    let user_id = signed_in(&session).await?;
+    let _dir = require_workspace(&state, user_id, &slug)?;
     let root = ensure_allowed(&state, Path::new(form.root.trim()))?;
     let candidates = api::scan_candidates(&root)?;
     let fragment = CandidatesFragment { slug, candidates };
@@ -405,10 +476,12 @@ async fn scan_root(
 /// `POST /w/{slug}/entities` — confirm a candidate: schema + binding.
 async fn add_entity(
     State(state): State<AppState>,
+    session: Session,
     AxumPath(slug): AxumPath<String>,
     Form(form): Form<EntityForm>,
 ) -> WebResult<Html<String>> {
-    let dir = require_workspace(&state, &slug)?;
+    let user_id = signed_in(&session).await?;
+    let dir = require_workspace(&state, user_id, &slug)?;
     let folder = ensure_allowed(&state, Path::new(form.folder.trim()))?;
 
     // Any engine refusal (empty folder, unreadable files) is surfaced to the
@@ -437,9 +510,11 @@ async fn add_entity(
 /// the bar move; the server stays responsive for other users.
 async fn stage_entity(
     State(state): State<AppState>,
+    session: Session,
     AxumPath((slug, entity)): AxumPath<(String, String)>,
 ) -> WebResult<Html<String>> {
-    let dir = require_workspace(&state, &slug)?;
+    let user_id = signed_in(&session).await?;
+    let dir = require_workspace(&state, user_id, &slug)?;
 
     let job_id = format!("j{}", state.job_seq.fetch_add(1, Ordering::Relaxed));
     let entry = Arc::new(Mutex::new(JobEntry {
@@ -490,9 +565,11 @@ async fn stage_entity(
 /// served.
 async fn job_status(
     State(state): State<AppState>,
+    session: Session,
     AxumPath((slug, job_id)): AxumPath<(String, String)>,
 ) -> WebResult<Html<String>> {
-    let _dir = require_workspace(&state, &slug)?;
+    let user_id = signed_in(&session).await?;
+    let _dir = require_workspace(&state, user_id, &slug)?;
 
     let entry = {
         let jobs = state
@@ -573,6 +650,136 @@ async fn job_status(
     }
 
     Ok(Html(html))
+}
+
+// ---------------------------------------------------------------------------
+// Authentication: pages, submit handlers, route guard middleware
+// ---------------------------------------------------------------------------
+
+/// User id from the session, or a 400 if the session somehow lost it.
+async fn signed_in(session: &Session) -> WebResult<i64> {
+    auth::current_user_id(session)
+        .await
+        .ok_or_else(|| WebError::bad_request("not signed in"))
+}
+
+/// Middleware guarding workspace routes: anonymous → redirect to the login page.
+///
+/// Being a middleware (not a check inside every handler) keeps the rule in one
+/// place: any new route added under the protected router is covered by default.
+async fn require_login(
+    State(state): State<AppState>,
+    session: Session,
+    request: Request,
+    next: Next,
+) -> Response {
+    match auth::current_user(&state.db, &session).await {
+        Some(_) => next.run(request).await,
+        None => Redirect::to("/login").into_response(),
+    }
+}
+
+/// `GET /login`
+async fn login_page() -> WebResult<Html<String>> {
+    let page = LoginTemplate { error: None };
+    Ok(Html(page.render().map_err(render_error)?))
+}
+
+/// `POST /login` — verify credentials, start a session.
+///
+/// Argon2 verification costs tens of milliseconds of CPU, so it runs on a
+/// blocking thread; otherwise a burst of logins would stall the async runtime.
+async fn login_submit(
+    State(state): State<AppState>,
+    session: Session,
+    Form(form): Form<CredentialsForm>,
+) -> WebResult<Response> {
+    let username = form.username.trim().to_string();
+    let password = form.password.clone();
+
+    let user = auth::find_user(&state.db, &username).await?;
+    let Some((id, _, phc)) = user else {
+        // Same message for "no such user" and "wrong password".
+        return Ok(login_failed("invalid username or password"));
+    };
+
+    let verified = tokio::task::spawn_blocking(move || auth::verify_password(&password, &phc))
+        .await
+        .map_err(|_| WebError::internal("password check panicked"))?;
+    if !verified {
+        return Ok(login_failed("invalid username or password"));
+    }
+
+    auth::login(&session, id)
+        .await
+        .map_err(|e| WebError::internal(e.0))?;
+    Ok(Redirect::to("/").into_response())
+}
+
+/// Render the login page with an error (200 so the browser keeps the form).
+fn login_failed(message: &str) -> Response {
+    let page = LoginTemplate {
+        error: Some(message.to_string()),
+    };
+    match page.render() {
+        Ok(html) => (StatusCode::UNAUTHORIZED, Html(html)).into_response(),
+        Err(error) => WebError::internal(format!("template error: {error}")).into_response(),
+    }
+}
+
+/// `GET /register`
+async fn register_page() -> WebResult<Html<String>> {
+    let page = RegisterTemplate { error: None };
+    Ok(Html(page.render().map_err(render_error)?))
+}
+
+/// `POST /register` — create the account and sign the user in.
+async fn register_submit(
+    State(state): State<AppState>,
+    session: Session,
+    Form(form): Form<CredentialsForm>,
+) -> WebResult<Response> {
+    let username = form.username.trim().to_string();
+    let password = form.password.clone();
+
+    if let Err(error) = auth::validate_credentials(&username, &password) {
+        return Ok(register_failed(&error.0));
+    }
+
+    // Hashing is intentionally expensive (Argon2id) → blocking thread.
+    let hash = tokio::task::spawn_blocking(move || auth::hash_password(&password))
+        .await
+        .map_err(|_| WebError::internal("password hashing panicked"))?
+        .map_err(|e| WebError::internal(e.0))?;
+
+    match auth::create_user(&state.db, &username, &hash).await {
+        Ok(id) => {
+            auth::login(&session, id)
+                .await
+                .map_err(|e| WebError::internal(e.0))?;
+            // Give the new user their own workspace root immediately.
+            let _ = std::fs::create_dir_all(state.user_root(id));
+            Ok(Redirect::to("/").into_response())
+        }
+        Err(error) => Ok(register_failed(&error.0)),
+    }
+}
+
+/// Render the registration page with an error.
+fn register_failed(message: &str) -> Response {
+    let page = RegisterTemplate {
+        error: Some(message.to_string()),
+    };
+    match page.render() {
+        Ok(html) => (StatusCode::BAD_REQUEST, Html(html)).into_response(),
+        Err(error) => WebError::internal(format!("template error: {error}")).into_response(),
+    }
+}
+
+/// `POST /logout` — destroy the server-side session.
+async fn logout_submit(session: Session) -> Redirect {
+    auth::logout(&session).await;
+    Redirect::to("/login")
 }
 
 // ---------------------------------------------------------------------------
@@ -742,21 +949,40 @@ async fn main() {
         )
         .init();
 
-    let (state, addr) = AppState::from_env();
-    std::fs::create_dir_all(&state.workspace_root).ok();
+    let (state, addr) = match AppState::from_env().await {
+        Ok(pair) => pair,
+        Err(error) => {
+            tracing::error!("startup failed: {error}");
+            std::process::exit(1);
+        }
+    };
 
-    let app = Router::new()
-        .route("/", get(index))
-        .route("/healthz", get(healthz))
-        .route("/metrics", get(metrics))
-        .route("/fragments/resources", get(resources_fragment))
+    // Routes that require a signed-in user. Everything workspace-related lives
+    // here, guarded by one middleware (`require_login`).
+    let protected = Router::new()
         .route("/workspaces", post(create_workspace))
         .route("/w/{slug}", get(hub))
         .route("/w/{slug}/scan", post(scan_root))
         .route("/w/{slug}/entities", post(add_entity))
         .route("/w/{slug}/entities/{entity}/stage", post(stage_entity))
         .route("/w/{slug}/jobs/{job_id}", get(job_status))
-        .with_state(state.clone());
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_login));
+
+    let app = Router::new()
+        .route("/", get(index))
+        .route("/healthz", get(healthz))
+        .route("/metrics", get(metrics))
+        .route("/fragments/resources", get(resources_fragment))
+        .route("/login", get(login_page).post(login_submit))
+        .route("/register", get(register_page).post(register_submit))
+        .route("/logout", post(logout_submit))
+        .merge(protected)
+        .with_state(state.clone())
+        // Session middleware must wrap everything (including the route-layer
+        // guard above), so it is applied last = outermost.
+        // `with_secure(false)` allows plain HTTP in local/dev; put the service
+        // behind TLS and flip it on in production.
+        .layer(SessionManagerLayer::new(MemoryStore::default()).with_secure(false));
 
     tracing::info!(
         "strata-web listening on http://{addr} (workspaces: {}, sources: {:?})",

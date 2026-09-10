@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Create account{% endblock %}
+
+{% block content %}
+<section class="card rounded-xl max-w-md mx-auto">
+    <div class="card-head px-4 py-2 rounded-t-xl">
+        <h1 class="text-sm font-semibold uppercase tracking-wider text-slate-400">Create account</h1>
+    </div>
+    <div class="p-4 space-y-4">
+        {% if let Some(message) = error %}
+            <div class="rounded-md border-l-4 border-l-red-500 bg-red-950/40 px-3 py-2 text-sm text-red-300">
+                {{ message }}
+            </div>
+        {% endif %}
+
+        <form method="post" action="/register" class="space-y-3">
+            <label class="block text-xs text-slate-400">
+                Username (3–32 chars: letters, digits, <span class="mono">_ - .</span>)
+                <input class="input mono rounded-md px-3 py-2 w-full mt-1"
+                       type="text" name="username" autocomplete="username" required>
+            </label>
+            <label class="block text-xs text-slate-400">
+                Password (min 8 chars)
+                <input class="input mono rounded-md px-3 py-2 w-full mt-1"
+                       type="password" name="password" autocomplete="new-password" required>
+            </label>
+            <button class="btn rounded-md px-4 py-2 text-sm w-full" type="submit">Create account</button>
+        </form>
+
+        <p class="text-xs text-slate-500">
+            Already registered? <a class="text-[#4da3ff] hover:underline" href="/login">Sign in</a>.
+        </p>
+    </div>
+</section>
+{% endblock %}

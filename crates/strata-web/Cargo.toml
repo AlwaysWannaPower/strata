@@ -14,4 +14,12 @@ askama = "0.14"
 serde = { version = "1", features = ["derive"] }
 sysinfo = "0.39"
 tracing = "0.1"
+
+# --- auth & storage (platform slice) -------------------------------------
+# Sessions as a tower/axum middleware (cookie-based, server-side store).
+tower-sessions = "0.15"
+# SQLite for users; swap to Postgres by changing the URL + feature.
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "sqlite", "macros", "migrate"] }
+# Argon2id password hashing (RustCrypto) — the recommended default.
+argon2 = "0.6"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

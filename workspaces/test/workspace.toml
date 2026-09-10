@@ -1,0 +1,5 @@
+format = 1
+name = "test"
+data_dir = "data"
+bindings = []
+scan_roots = []
