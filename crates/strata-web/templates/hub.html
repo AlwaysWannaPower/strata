@@ -2,41 +2,30 @@
 {% block title %}{{ name }}{% endblock %}
 
 {% block content %}
-{# «Хаб пайплайна» воркспейса: одна страница, три шага —
-   1) указать корень источника, 2) подтвердить сущности (схема), 3) staged в Parquet.
-   Все три обращаются к strata_core::api; htmx подменяет фрагменты ниже. #}
+{# «Хаб пайплайна» воркспейса. Верхний уровень — путь из четырёх шагов
+   (1 Source · 2 Schema · 3 Rules · 4 ODS); сам степпер, подсказка «что дальше»
+   и формы добавления данных живут во фрагменте `fragments/entities.html`,
+   потому что htmx подменяет его целиком после подтверждения сущности и тогда
+   обновляются и шаг, и список. #}
 <section class="card rounded-xl">
     <div class="card-head px-4 py-2 rounded-t-xl flex flex-wrap items-center gap-3">
         <h1 class="text-base font-semibold">Workspace: {{ name }}</h1>
         <span class="text-[11px] mono text-slate-500">/w/{{ slug }} · data → {{ data_dir }}</span>
+        <span class="text-[11px] mono text-slate-500 truncate">your files area → {{ files_area }}</span>
         <span class="ml-auto text-[11px] mono text-slate-500">uptime {{ uptime_secs }}s</span>
     </div>
 
     <div class="p-4 space-y-4">
-        {# --- Шаг 1: сканирование корня (режим B: прямые подпапки — это сущности) --- #}
-        <form class="flex flex-wrap gap-2 items-center"
-              hx-post="/w/{{ slug }}/scan"
-              hx-target="#candidates"
-              hx-swap="innerHTML">
-            <input class="input mono rounded-md px-3 py-2 flex-1 min-w-[280px]"
-                   type="text" name="root"
-                   placeholder="Root folder whose direct subfolders are entities…" required>
-            <button class="btn rounded-md px-4 py-2 text-sm" type="submit">
-                Scan root <span class="spinner">…</span>
-            </button>
-        </form>
-        <p class="text-[11px] text-slate-500">
-            Read-only: scanning proposes entities, nothing is written until you confirm.
-        </p>
-
-        {# --- Шаг 2: цель для фрагмента кандидатов ---------------------------- #}
-        <div id="candidates"></div>
-
-        {# --- Шаг 3: подтверждённые сущности (тоже цель confirm/stage) -------- #}
+        {# Степпер + карточка «Add your data» или список сущностей. Цель htmx-подмен
+           для режима A и для подтверждения кандидата. #}
         <div id="entities">
             {% include "fragments/entities.html" %}
         </div>
 
+        {# Кандидаты сканирования (режим B): предложение, ничего не записано. #}
+        <div id="candidates"></div>
+
+        {# Стадия staging: прогресс фоновой задачи и её финальный отчёт. #}
         <div id="stage"></div>
     </div>
 </section>

@@ -212,6 +212,259 @@ impl StageStatus {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Степпер пайплайна воркспейса: 1 Source · 2 Schema · 3 Rules · 4 ODS
+// ---------------------------------------------------------------------------
+
+/// Крупный шаг пути пользователя — то, что рисует степпер на `/w/{slug}`.
+///
+/// Это «внешний» уровень по отношению к стадиям сущности ([`Tab`]): у
+/// воркспейса шагов четыре, потому что шаг 1 (источник) заканчивается, как
+/// только появилась хотя бы одна сущность, и дальше работа идёт с ней.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PipelineStep {
+    /// Куда смотреть: папка с файлами ещё не привязана ни к одной сущности.
+    Source,
+    /// Схема: колонки и типы подтверждены.
+    Schema,
+    /// Правила: проверки, которым должны удовлетворять данные.
+    Rules,
+    /// Прогон: ODS + карантин + манифест.
+    Ods,
+}
+
+impl PipelineStep {
+    /// Шаги в порядке пути пользователя.
+    pub(crate) const ALL: [PipelineStep; 4] = [
+        PipelineStep::Source,
+        PipelineStep::Schema,
+        PipelineStep::Rules,
+        PipelineStep::Ods,
+    ];
+
+    /// Номер шага (1…4) — рисуется перед подписью («2 Schema»).
+    pub(crate) fn number(self) -> usize {
+        match self {
+            PipelineStep::Source => 1,
+            PipelineStep::Schema => 2,
+            PipelineStep::Rules => 3,
+            PipelineStep::Ods => 4,
+        }
+    }
+
+    /// Подпись шага.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            PipelineStep::Source => "Source",
+            PipelineStep::Schema => "Schema",
+            PipelineStep::Rules => "Rules",
+            PipelineStep::Ods => "ODS",
+        }
+    }
+
+    /// Что происходит на шаге — одно короткое пояснение (его же показывает
+    /// полоса «как это работает» на главной, чтобы текст не дублировался).
+    pub(crate) fn detail(self) -> &'static str {
+        match self {
+            PipelineStep::Source => "Point at a folder with your files",
+            PipelineStep::Schema => "Confirm columns and types",
+            PipelineStep::Rules => "Add the checks your data must pass",
+            PipelineStep::Ods => "Run it and get clean ODS",
+        }
+    }
+
+    /// Вкладка сущности, где живёт шаг. У шага 1 её нет: сущности ещё нет, и
+    /// работать не над чем — сначала нужно её создать (пустое состояние хаба).
+    pub(crate) fn tab(self) -> Option<Tab> {
+        match self {
+            PipelineStep::Source => Option::None,
+            PipelineStep::Schema => Some(Tab::Schema),
+            PipelineStep::Rules => Some(Tab::Rules),
+            PipelineStep::Ods => Some(Tab::Ods),
+        }
+    }
+
+    /// Что этот шаг добавит к данным — подпись для «Next: … for sales».
+    fn action(self) -> Option<&'static str> {
+        match self {
+            PipelineStep::Source => Option::None,
+            PipelineStep::Schema => Some("schema"),
+            PipelineStep::Rules => Some("rules"),
+            PipelineStep::Ods => Some("run"),
+        }
+    }
+}
+
+/// Один шаг степпера, готовый к отрисовке.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StepView {
+    /// `1 Source` — номер и подпись.
+    pub(crate) title: String,
+    /// Короткое пояснение шага.
+    pub(crate) detail: String,
+    /// Ссылка на вкладку сущности (шаги 2–4, когда сущность уже есть).
+    pub(crate) href: Option<String>,
+    /// Состояние шага: `done`, `now` или `todo` (нужно тестам и верстке).
+    pub(crate) state: String,
+    /// Классы Tailwind для рамки/текста.
+    pub(crate) class: String,
+}
+
+/// Подсказка «что делать дальше» — одна строка со ссылкой.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HintView {
+    /// Текст подсказки (`Next: schema for sales`).
+    pub(crate) text: String,
+    /// Куда ведёт ссылка (вкладка сущности).
+    pub(crate) href: String,
+}
+
+/// Где пользователь находится на пути «источник → схема → правила → ODS».
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PipelineProgress {
+    /// Текущий шаг.
+    pub(crate) current: PipelineStep,
+    /// Сколько шагов уже пройдено (0…4) — из этого рисуются галочки.
+    pub(crate) completed: usize,
+    /// Есть успешный прогон: весь путь пройден, данные можно отдавать.
+    pub(crate) ready_to_serve: bool,
+    /// Сущность, на которой стоит работать (её открывает ссылка шага).
+    pub(crate) focus_entity: Option<String>,
+}
+
+impl PipelineProgress {
+    /// Вывести шаг из статусов сущностей воркспейса.
+    ///
+    /// Чистая функция: никаких файлов и БД, поэтому правила читаются прямо
+    /// здесь, а тесты не трогают диск. Приоритет проверок — ровно как в
+    /// постановке, сверху вниз:
+    ///
+    /// 1. ни одной сущности → шаг 1 (нужен источник);
+    /// 2. есть сущность без подтверждённой схемы → шаг 2;
+    /// 3. ни у одной подтверждённой схемы нет правил → шаг 3;
+    /// 4. схемы подтверждены, но успешных прогонов нет → шаг 4 («готово к прогону»);
+    /// 5. есть успешный прогон → весь путь пройден («ready to serve»).
+    ///
+    /// Вход — пары «имя сущности + её статус»: так функция остаётся независимой
+    /// от структур веб-слоя (см. `entity::pipeline_progress`).
+    pub(crate) fn from_statuses(rows: &[(String, StageStatus)]) -> PipelineProgress {
+        // Шаг 1: работать не с чем — сначала папка с файлами.
+        if rows.is_empty() {
+            return PipelineProgress {
+                current: PipelineStep::Source,
+                completed: 0,
+                ready_to_serve: false,
+                focus_entity: Option::None,
+            };
+        }
+
+        // Шаг 2: первая сущность, у которой схема ещё не подтверждена.
+        if let Some((entity, _)) = rows.iter().find(|(_, status)| !status.schema_confirmed) {
+            return PipelineProgress {
+                current: PipelineStep::Schema,
+                completed: 1,
+                ready_to_serve: false,
+                focus_entity: Some(entity.clone()),
+            };
+        }
+
+        // Шаг 3: все схемы подтверждены, но правил ещё нет ни у одной.
+        if rows.iter().all(|(_, status)| status.rules == 0) {
+            return PipelineProgress {
+                current: PipelineStep::Rules,
+                completed: 2,
+                ready_to_serve: false,
+                focus_entity: rows.first().map(|(entity, _)| entity.clone()),
+            };
+        }
+
+        // Шаги 4/5: правила есть. Смотрим на прогоны: успешный прогон закрывает
+        // весь путь, иначе остаётся «готово к прогону».
+        let pending = rows.iter().find(|(_, status)| !status.ods_ok);
+        match pending {
+            Some((entity, _)) => PipelineProgress {
+                current: PipelineStep::Ods,
+                completed: 3,
+                ready_to_serve: false,
+                focus_entity: Some(entity.clone()),
+            },
+            Option::None => PipelineProgress {
+                current: PipelineStep::Ods,
+                completed: PipelineStep::ALL.len(),
+                ready_to_serve: true,
+                focus_entity: Option::None,
+            },
+        }
+    }
+
+    /// Шаги степпера с подсветкой текущего. Ссылки ведут в ту же сущность,
+    /// поэтому шаги 2–4 — обычные ссылки на её вкладку (`?tab=…`).
+    pub(crate) fn steps(&self, slug: &str) -> Vec<StepView> {
+        PipelineStep::ALL
+            .iter()
+            .map(|step| {
+                let state = if step.number() <= self.completed {
+                    "done"
+                } else if *step == self.current {
+                    "now"
+                } else {
+                    "todo"
+                };
+                StepView {
+                    title: format!("{} {}", step.number(), step.label()),
+                    detail: step.detail().to_string(),
+                    href: self.step_href(slug, *step),
+                    state: state.to_string(),
+                    class: format!(
+                        "flex-1 min-w-[160px] rounded-lg border px-3 py-2 text-xs {}",
+                        match state {
+                            "done" => TONE_OK,
+                            "now" => "border-[#4da3ff] text-slate-100",
+                            _ => TONE_NONE,
+                        }
+                    ),
+                }
+            })
+            .collect()
+    }
+
+    /// Ссылка шага: только если шаг ведёт в сущность, а она уже есть.
+    fn step_href(&self, slug: &str, step: PipelineStep) -> Option<String> {
+        let (tab, entity) = (step.tab()?, self.focus_entity.as_deref()?);
+        Some(format!("/w/{slug}/e/{entity}?tab={}", tab.key()))
+    }
+
+    /// Строка «Next: schema for sales» со ссылкой — чтобы следующий шаг был
+    /// виден всегда, даже когда список сущностей длинный.
+    ///
+    /// Возвращает `None`, когда подсказывать нечего: пустой воркспейс (там своя
+    /// карточка «Add your data») и полностью пройденный путь (там бейдж
+    /// «ready to serve»).
+    pub(crate) fn hint(&self, slug: &str) -> Option<HintView> {
+        let action = self.current.action()?;
+        let entity = self.focus_entity.as_deref()?;
+        let href = self.step_href(slug, self.current)?;
+        Some(HintView {
+            text: format!("Next: {action} for {entity}"),
+            href,
+        })
+    }
+
+    /// Короткая сводка для шапки степпера.
+    pub(crate) fn badge(&self) -> String {
+        if self.ready_to_serve {
+            String::from("ready to serve")
+        } else {
+            format!(
+                "Step {} of {} · {}",
+                self.current.number(),
+                PipelineStep::ALL.len(),
+                self.current.label()
+            )
+        }
+    }
+}
+
 /// Тон «готово».
 pub(crate) const TONE_OK: &str = "border-emerald-700 text-emerald-400";
 /// Тон «есть проблема / не завершено».
@@ -322,6 +575,154 @@ mod tests {
         assert_eq!(draft.pill(Tab::Ods).text, "errors");
         assert_eq!(draft.pill(Tab::Ods).class, TONE_BAD);
         assert_eq!(draft.pill(Tab::Logs).text, "1 run(s)");
+    }
+
+    /// Статус сущности для тестов степпера (лишь то, что влияет на шаг).
+    fn status(schema_confirmed: bool, rules: usize, runs: usize, ods_ok: bool) -> StageStatus {
+        StageStatus {
+            files: 1,
+            schema_confirmed,
+            rules,
+            runs,
+            ods_ok,
+            ..StageStatus::default()
+        }
+    }
+
+    /// Пара «сущность + статус» — вход чистой функции шага.
+    fn row(entity: &str, status: StageStatus) -> (String, StageStatus) {
+        (entity.to_string(), status)
+    }
+
+    #[test]
+    fn pipeline_step_walks_source_schema_rules_ods() {
+        // 1. Ни одной сущности — нужен источник.
+        let empty = PipelineProgress::from_statuses(&[]);
+        assert_eq!(empty.current, PipelineStep::Source);
+        assert_eq!(empty.completed, 0);
+        assert_eq!(empty.focus_entity, None);
+        assert!(!empty.ready_to_serve);
+
+        // 2. Есть сущность без подтверждённой схемы.
+        let proposed = PipelineProgress::from_statuses(&[row("sales", status(false, 0, 0, false))]);
+        assert_eq!(proposed.current, PipelineStep::Schema);
+        assert_eq!(proposed.completed, 1);
+        assert_eq!(proposed.focus_entity.as_deref(), Some("sales"));
+
+        // Готовая схема у одной сущности не спасает, если у второй её нет:
+        // ведём пользователя к незаполненной.
+        let mixed = PipelineProgress::from_statuses(&[
+            row("sales", status(true, 3, 0, false)),
+            row("clients", status(false, 0, 0, false)),
+        ]);
+        assert_eq!(mixed.current, PipelineStep::Schema);
+        assert_eq!(mixed.focus_entity.as_deref(), Some("clients"));
+
+        // 3. Схемы подтверждены, но правил нет ни у одной.
+        let no_rules = PipelineProgress::from_statuses(&[row("sales", status(true, 0, 0, false))]);
+        assert_eq!(no_rules.current, PipelineStep::Rules);
+        assert_eq!(no_rules.completed, 2);
+        assert_eq!(no_rules.focus_entity.as_deref(), Some("sales"));
+
+        // 4. Правила есть, успешных прогонов нет — «готово к прогону».
+        // Прогон с ошибками успешным не считается, поэтому ведём к той сущности,
+        // у которой ещё не было чистого прогона.
+        let ready_to_run = PipelineProgress::from_statuses(&[
+            row("sales", status(true, 5, 1, true)),
+            row("clients", status(true, 2, 0, false)),
+        ]);
+        assert_eq!(ready_to_run.current, PipelineStep::Ods);
+        assert_eq!(ready_to_run.completed, 3);
+        assert_eq!(ready_to_run.focus_entity.as_deref(), Some("clients"));
+        assert!(!ready_to_run.ready_to_serve);
+
+        // 5. Есть успешный прогон — весь путь пройден.
+        let served = PipelineProgress::from_statuses(&[
+            row("sales", status(true, 5, 1, true)),
+            row("clients", status(true, 2, 1, true)),
+        ]);
+        assert_eq!(served.current, PipelineStep::Ods);
+        assert_eq!(served.completed, PipelineStep::ALL.len());
+        assert!(served.ready_to_serve);
+        assert_eq!(served.badge(), "ready to serve");
+    }
+
+    #[test]
+    fn stepper_marks_done_now_and_links_the_entity_tab() {
+        let progress = PipelineProgress::from_statuses(&[row("sales", status(true, 0, 0, false))]);
+        let steps = progress.steps("ws-1");
+        assert_eq!(steps.len(), PipelineStep::ALL.len());
+        assert_eq!(steps[0].title, "1 Source");
+        assert_eq!(steps[0].state, "done");
+        assert!(
+            steps[0].class.contains(TONE_OK),
+            "пройденный шаг зелёный: {}",
+            steps[0].class
+        );
+        // Шаг 1 некуда вести: сущность уже есть, но «источник» — про выбор папки.
+        assert_eq!(steps[0].href, None);
+
+        let current = &steps[2];
+        assert_eq!(current.title, "3 Rules");
+        assert_eq!(current.state, "now");
+        assert!(current.class.contains("#4da3ff"), "{}", current.class);
+        assert_eq!(
+            current.href.as_deref(),
+            Some("/w/ws-1/e/sales?tab=rules"),
+            "шаг ведёт во вкладку сущности"
+        );
+
+        // Будущий шаг помечен как «не начат» и всё ещё ведёт в ODS.
+        assert_eq!(steps[3].state, "todo");
+        assert!(
+            steps[3].class.contains(TONE_NONE),
+            "будущий шаг серый: {}",
+            steps[3].class
+        );
+        assert_eq!(steps[3].href.as_deref(), Some("/w/ws-1/e/sales?tab=ods"));
+
+        // Пока сущности нет, ссылок нет вообще: шаги — просто подписи.
+        let empty = PipelineProgress::from_statuses(&[]);
+        let steps = empty.steps("ws-1");
+        assert_eq!(steps[0].state, "now");
+        assert!(steps.iter().all(|step| step.href.is_none()));
+    }
+
+    #[test]
+    fn next_step_hint_names_the_action_and_the_entity() {
+        let schema = PipelineProgress::from_statuses(&[row("sales", status(false, 0, 0, false))]);
+        let hint = schema.hint("ws-1").expect("подсказка шага 2");
+        assert_eq!(hint.text, "Next: schema for sales");
+        assert_eq!(hint.href, "/w/ws-1/e/sales?tab=schema");
+
+        let rules = PipelineProgress::from_statuses(&[row("sales", status(true, 0, 0, false))]);
+        assert_eq!(
+            rules.hint("ws-1").expect("подсказка шага 3").text,
+            "Next: rules for sales"
+        );
+
+        let run = PipelineProgress::from_statuses(&[row("sales", status(true, 4, 0, false))]);
+        let hint = run.hint("ws-1").expect("подсказка шага 4");
+        assert_eq!(hint.text, "Next: run for sales");
+        assert_eq!(hint.href, "/w/ws-1/e/sales?tab=ods");
+
+        // Пустой воркспейс и пройденный путь подсказки не показывают: там
+        // работает карточка «Add your data» и бейдж «ready to serve».
+        assert!(PipelineProgress::from_statuses(&[]).hint("ws-1").is_none());
+        let served = PipelineProgress::from_statuses(&[row("sales", status(true, 4, 1, true))]);
+        assert!(served.hint("ws-1").is_none());
+    }
+
+    #[test]
+    fn badge_counts_the_current_step() {
+        assert_eq!(
+            PipelineProgress::from_statuses(&[]).badge(),
+            "Step 1 of 4 · Source"
+        );
+        assert_eq!(
+            PipelineProgress::from_statuses(&[row("sales", status(true, 1, 0, false))]).badge(),
+            "Step 4 of 4 · ODS"
+        );
     }
 
     #[test]

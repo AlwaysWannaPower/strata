@@ -1,0 +1,52 @@
+{# Комментарий: два способа начать работу — оба ведут на уже существующие
+   маршруты (`POST /w/{slug}/entities` и `POST /w/{slug}/scan`), поэтому в
+   веб-слое не появляется новых состояний: пользователь либо называет папку
+   одной таблицы, либо сканирует корень, где каждая прямая подпапка — сущность.
+   Шаблон включается и в пустом состоянии, и внутри «Add more data» на хабе. #}
+<div class="grid gap-3 md:grid-cols-2">
+    {# --- Вариант A: одна папка = одна сущность ----------------------------- #}
+    <div class="rounded-lg border border-slate-700 p-3 space-y-2">
+        <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-300">
+            One folder = one entity
+        </h3>
+        <p class="text-[11px] text-slate-500">
+            Name the table and point at its folder. All files there must belong to
+            one table — the same columns in every file.
+        </p>
+        <form class="space-y-2"
+              hx-post="/w/{{ slug }}/entities"
+              hx-target="#entities"
+              hx-swap="innerHTML">
+            <input class="input mono rounded-md px-3 py-2 w-full"
+                   type="text" name="entity" placeholder="Entity name (e.g. sales)" required>
+            <input class="input mono rounded-md px-3 py-2 w-full"
+                   type="text" name="folder" placeholder="Folder path (e.g. {{ files_area }}/sales)" required>
+            <button class="btn rounded-md px-4 py-2 text-sm" type="submit">
+                Add entity <span class="spinner">…</span>
+            </button>
+        </form>
+    </div>
+
+    {# --- Вариант B: сканировать корень ------------------------------------- #}
+    <div class="rounded-lg border border-slate-700 p-3 space-y-2">
+        <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-300">Scan a root</h3>
+        <p class="text-[11px] text-slate-500">
+            Each direct subfolder becomes one entity. Nesting is not supported.
+        </p>
+        <p class="text-[11px] mono text-slate-500">root/sales/*.csv · root/clients/*.csv</p>
+        <form class="space-y-2"
+              hx-post="/w/{{ slug }}/scan"
+              hx-target="#candidates"
+              hx-swap="innerHTML">
+            <input class="input mono rounded-md px-3 py-2 w-full"
+                   type="text" name="root" placeholder="Root folder (e.g. {{ files_area }})" required>
+            <button class="btn rounded-md px-4 py-2 text-sm" type="submit">
+                Scan root <span class="spinner">…</span>
+            </button>
+        </form>
+        <p class="text-[11px] text-slate-500">
+            No allowed folder yet? Put your files in <span class="mono">{{ files_area }}</span>
+            and scan that path. Scanning only proposes entities — nothing is saved until you confirm.
+        </p>
+    </div>
+</div>

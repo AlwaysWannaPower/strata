@@ -44,7 +44,10 @@ use crate::forms::{
     draft_key, format_duration, human_size, parse_column_name, parse_dtype, parse_file_name,
     parse_path_token, parse_rule, severity_token, url_encode,
 };
-use crate::status::{PillView, TONE_BAD, TONE_OK, TONE_WARN, Tab, TabView, entity_status};
+use crate::status::{
+    HintView, PillView, PipelineProgress, StageStatus, TONE_BAD, TONE_OK, TONE_WARN, Tab, TabView,
+    entity_status,
+};
 use crate::{
     AppState, ErrorFragment, JobRunningFragment, WebError, WebResult, render_error,
     require_workspace, signed_in,
@@ -123,18 +126,42 @@ pub(crate) struct EntityRowView {
     pub(crate) folder: String,
     /// Пилюли стадий (файлы, схема, правила, ODS, логи).
     pub(crate) pills: Vec<PillView>,
+    /// Тот же снимок стадий в виде данных: из него считается шаг пайплайна
+    /// (степпер хаба), а не только подписи пилюль.
+    pub(crate) status: StageStatus,
 }
 
 /// Строки сущностей воркспейса для хаба (`GET /w/{slug}`).
 pub(crate) fn entity_rows(dir: &Path) -> WebResult<Vec<EntityRowView>> {
     Ok(api::entities(dir)?
         .into_iter()
-        .map(|info| EntityRowView {
-            pills: entity_status(dir, &info.entity, info.has_schema).pills(),
-            entity: info.entity,
-            folder: info.folder.display().to_string(),
+        .map(|info| {
+            let status = entity_status(dir, &info.entity, info.has_schema);
+            EntityRowView {
+                pills: status.pills(),
+                entity: info.entity,
+                folder: info.folder.display().to_string(),
+                status,
+            }
         })
         .collect())
+}
+
+/// Текущий шаг пути и подсказка «что дальше» по строкам хаба.
+///
+/// Строки уже несут снимок стадий, поэтому шаг считается без обращений к диску:
+/// сам расчёт — чистая функция [`PipelineProgress::from_statuses`].
+pub(crate) fn pipeline_view(
+    slug: &str,
+    rows: &[EntityRowView],
+) -> (PipelineProgress, Option<HintView>) {
+    let pairs: Vec<(String, StageStatus)> = rows
+        .iter()
+        .map(|row| (row.entity.clone(), row.status.clone()))
+        .collect();
+    let progress = PipelineProgress::from_statuses(&pairs);
+    let hint = progress.hint(slug);
+    (progress, hint)
 }
 
 /// Найти привязку сущности (имя приходит из URL — сначала проверяем его).

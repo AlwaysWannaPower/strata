@@ -47,7 +47,7 @@ mod status;
 
 use askama::Template;
 use axum::extract::{Path as AxumPath, Request, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -334,10 +334,54 @@ fn ensure_allowed(state: &AppState, candidate: &Path) -> WebResult<PathBuf> {
             }
         }
     }
-    Err(WebError::bad_request(format!(
-        "path {} is outside the allowed source roots",
-        candidate.display()
+    Err(WebError::bad_request(outside_allowed_roots_message(
+        candidate,
+        &state.source_roots,
     )))
+}
+
+/// Сообщение об отказе по allowlist: что разрешено, почему и где это меняют.
+///
+/// Отказ в чтении папки — самая частая ошибка первого шага, поэтому сообщение
+/// обязано быть действием: перечисляем корни и называем переменную окружения.
+/// Отрисовку путей здесь не делаем — она дешёвая и чистая, поэтому проверяется
+/// тестом без запуска сервиса.
+fn outside_allowed_roots_message(candidate: &Path, roots: &[PathBuf]) -> String {
+    let allowed = if roots.is_empty() {
+        String::from("(none configured)")
+    } else {
+        roots
+            .iter()
+            .map(|root| root.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "Path {} is outside the folders this server may read. Allowed roots: {allowed}. \
+         The service only reads folders listed in STRATA_SOURCE_ROOTS.",
+        candidate.display()
+    )
+}
+
+/// Разобрать форму режима A («одна папка = одна сущность»): имя сущности и путь.
+///
+/// Пустые поля отсекаются здесь, а не в движке: иначе пользователь получил бы
+/// «path not found: » вместо понятного «нужно имя». Пробелы по краям срезаем —
+/// их легко набрать копипастом пути.
+fn parse_entity_form(form: EntityForm) -> WebResult<(String, PathBuf)> {
+    let entity = form.entity.trim();
+    let folder = form.folder.trim();
+    if entity.is_empty() {
+        return Err(WebError::bad_request(
+            "Entity name is required — it becomes the table name in ODS.",
+        ));
+    }
+    if folder.is_empty() {
+        return Err(WebError::bad_request(
+            "Folder path is required — it is the folder this entity reads.",
+        ));
+    }
+    Ok((entity.to_string(), PathBuf::from(folder)))
 }
 
 /// Разрешить slug воркспейса в существующий каталог воркспейса.
@@ -364,6 +408,17 @@ struct WsRow {
     data_dir: String,
 }
 
+/// Один шаг полосы «как это работает» на главной (`1 Source — Point at a folder…`).
+///
+/// Подписи берутся из [`status::PipelineStep`], то есть из того же места, что и
+/// степпер хаба: текст шага описан в коде ровно один раз.
+struct HowStepView {
+    /// Готовая подпись шага: номер и название (`1 Source`).
+    title: String,
+    /// Короткое пояснение шага.
+    detail: String,
+}
+
 /// Главная страница: список воркспейсов + форма создания.
 #[derive(Template)]
 #[template(path = "index.html")]
@@ -373,28 +428,84 @@ struct IndexTemplate {
     workspaces: Vec<WsRow>,
     workspace_root: String,
     source_roots: Vec<String>,
+    /// Личная папка пользователя (`workspaces/<user_id>/`), куда он может
+    /// положить файлы и указать её как scan root. `None` для анонима.
+    files_area: Option<String>,
+    /// Полоса «как это работает»: Source → Schema → Rules → ODS.
+    steps: Vec<HowStepView>,
 }
 
-/// «Хаб пайплайна» воркспейса: сущности, форма сканирования, кнопки запуска staging.
+/// «Хаб пайплайна» воркспейса: степпер пути, сущности и формы добавления данных.
 ///
-/// В строках сущностей видны статусы всех четырёх стадий (пилюли) и кнопка
-/// «Open», ведущая на страницу сущности (`/w/{slug}/e/{entity}`).
+/// Степпер (1 Source · 2 Schema · 3 Rules · 4 ODS) стоит первым: он отвечает на
+/// вопрос «где я и что дальше», из-за которого пользователь и терялся. Шаги 2–4
+/// ведут прямо во вкладку сущности; шаг 1 закрывается карточкой «Add your data».
+///
+/// Поля степпера продублированы здесь и в [`EntitiesFragment`], потому что
+/// `hub.html` подключает фрагмент через `{% include %}`: шаблон берёт значения
+/// из контекста страницы, а не из отдельной структуры.
 #[derive(Template)]
 #[template(path = "hub.html")]
 struct HubTemplate {
     slug: String,
     name: String,
     data_dir: String,
+    /// Личная папка пользователя — куда положить файлы, если сервису не
+    /// разрешено читать папки вне allowlist.
+    files_area: String,
     rows: Vec<entity::EntityRowView>,
+    /// Шаги степпера с подсветкой текущего.
+    stepper: Vec<status::StepView>,
+    /// `Step 2 of 4 · Schema` или `ready to serve`.
+    progress_badge: String,
+    /// Весь путь пройден — есть успешный прогон.
+    ready_to_serve: bool,
+    /// Строка «Next: … for sales» со ссылкой (когда подсказывать есть что).
+    hint: Option<status::HintView>,
+    /// Ошибка добавления: на самой странице хаба её нет (поле нужно, потому что
+    /// `hub.html` подключает фрагмент сущностей через `{% include %}`).
+    error: Option<String>,
     uptime_secs: u64,
 }
 
-/// Фрагмент: карточки сущностей (также возвращается после подтверждения/запуска).
+/// Фрагмент: степпер + карточка «Add your data» или список сущностей.
+///
+/// Тот же фрагмент возвращается после подтверждения сущности, поэтому степпер и
+/// подсказка «что дальше» обновляются вместе со списком.
 #[derive(Template)]
 #[template(path = "fragments/entities.html")]
 struct EntitiesFragment {
     slug: String,
+    files_area: String,
     rows: Vec<entity::EntityRowView>,
+    stepper: Vec<status::StepView>,
+    progress_badge: String,
+    ready_to_serve: bool,
+    hint: Option<status::HintView>,
+    /// Ошибка добавления/подтверждения сущности, показанная внутри блока.
+    error: Option<String>,
+}
+
+impl EntitiesFragment {
+    /// Собрать фрагмент: строки + посчитанный по ним шаг пути.
+    fn build(
+        slug: String,
+        files_area: String,
+        rows: Vec<entity::EntityRowView>,
+        error: Option<String>,
+    ) -> Self {
+        let (progress, hint) = entity::pipeline_view(&slug, &rows);
+        EntitiesFragment {
+            stepper: progress.steps(&slug),
+            progress_badge: progress.badge(),
+            ready_to_serve: progress.ready_to_serve,
+            hint,
+            slug,
+            files_area,
+            rows,
+            error,
+        }
+    }
 }
 
 /// Фрагмент: кандидаты сканирования с формами «подтвердить и привязать».
@@ -484,6 +595,9 @@ async fn index(State(state): State<AppState>, session: Session) -> WebResult<Htm
         })
         .collect();
     let page = IndexTemplate {
+        files_area: user
+            .as_ref()
+            .map(|u| state.user_root(u.id).display().to_string()),
         user: user.map(|u| u.username),
         workspaces,
         workspace_root: root.display().to_string(),
@@ -491,6 +605,13 @@ async fn index(State(state): State<AppState>, session: Session) -> WebResult<Htm
             .source_roots
             .iter()
             .map(|p| p.display().to_string())
+            .collect(),
+        steps: status::PipelineStep::ALL
+            .iter()
+            .map(|step| HowStepView {
+                title: format!("{} {}", step.number(), step.label()),
+                detail: step.detail().to_string(),
+            })
             .collect(),
     };
     Ok(Html(page.render().map_err(render_error)?))
@@ -515,6 +636,9 @@ async fn create_workspace(
 }
 
 /// `GET /w/{slug}` — хаб пайплайна одного воркспейса.
+///
+/// Порядок блока сущностей — это и есть ответ на «что делать дальше»: степпер
+/// текущего шага, строка «Next: … for {entity}» и список сущностей с пилюлями.
 async fn hub(
     State(state): State<AppState>,
     session: Session,
@@ -523,11 +647,20 @@ async fn hub(
     let user_id = signed_in(&session).await?;
     let dir = require_workspace(&state, user_id, &slug)?;
     let info = api::open_workspace_at(&dir)?;
+    let files_area = state.user_root(user_id).display().to_string();
+    let rows = entity::entity_rows(&dir)?;
+    let (progress, hint) = entity::pipeline_view(&slug, &rows);
     let page = HubTemplate {
-        slug,
+        slug: slug.clone(),
         name: info.name,
         data_dir: info.data_dir.display().to_string(),
-        rows: entity::entity_rows(&dir)?,
+        files_area,
+        stepper: progress.steps(&slug),
+        progress_badge: progress.badge(),
+        ready_to_serve: progress.ready_to_serve,
+        hint,
+        rows,
+        error: None,
         uptime_secs: state.started.elapsed().as_secs(),
     };
     Ok(Html(page.render().map_err(render_error)?))
@@ -540,19 +673,41 @@ async fn hub(
 async fn scan_root(
     State(state): State<AppState>,
     session: Session,
+    headers: HeaderMap,
     AxumPath(slug): AxumPath<String>,
     Form(form): Form<ScanForm>,
 ) -> WebResult<Html<String>> {
     // Воркспейс должен существовать; самому сканированию нужен только путь корня.
     let user_id = signed_in(&session).await?;
     let _dir = require_workspace(&state, user_id, &slug)?;
-    let root = ensure_allowed(&state, Path::new(form.root.trim()))?;
-    let candidates = api::scan_candidates(&root)?;
+    // Пустая строка дала бы «path not found: » — подсказываем, чего не хватает.
+    let root_input = form.root.trim();
+    if root_input.is_empty() {
+        return form_error(
+            &headers,
+            "Root folder path is required — scanning looks at its direct subfolders.",
+        );
+    }
+    // Путь вне allowlist — самая частая ошибка; показываем её прямо в блоке
+    // кандидатов (см. `form_error`), а не молчаливым 400.
+    let root = match ensure_allowed(&state, Path::new(root_input)) {
+        Ok(root) => root,
+        Err(error) => return form_error(&headers, error.message()),
+    };
+    let candidates = match api::scan_candidates(&root) {
+        Ok(candidates) => candidates,
+        Err(error) => return form_error(&headers, error.message()),
+    };
     let fragment = CandidatesFragment { slug, candidates };
     Ok(Html(fragment.render().map_err(render_error)?))
 }
 
 /// `POST /w/{slug}/entities` — подтвердить кандидата: схема + привязка.
+///
+/// Этим маршрутом пользуются оба пути добавления данных: карточка режима A
+/// («одна папка = одна сущность») и кнопка «Confirm & bind» у кандидата скана.
+/// Ответ — тот же фрагмент, что и у хаба, поэтому вместе со списком обновляются
+/// степпер и подсказка «что дальше».
 async fn add_entity(
     State(state): State<AppState>,
     session: Session,
@@ -561,23 +716,35 @@ async fn add_entity(
 ) -> WebResult<Html<String>> {
     let user_id = signed_in(&session).await?;
     let dir = require_workspace(&state, user_id, &slug)?;
-    let folder = ensure_allowed(&state, Path::new(form.folder.trim()))?;
+    let files_area = state.user_root(user_id).display().to_string();
 
-    // Любой отказ движка (пустая папка, нечитаемые файлы) показывается
-    // пользователю как htmx-фрагмент ошибки вместо голой страницы 400.
-    if let Err(error) = api::confirm_entity(&dir, &form.entity, &folder) {
-        return Ok(Html(
-            ErrorFragment {
-                message: error.message().to_string(),
-            }
-            .render()
-            .map_err(render_error)?,
-        ));
-    }
-    let fragment = EntitiesFragment {
-        slug,
-        rows: entity::entity_rows(&dir)?,
+    // Ошибки формы и allowlist показываем внутри блока сущностей: степпер и уже
+    // добавленные сущности остаются на месте.
+    let inline_error = |dir: &std::path::Path, message: String| -> WebResult<Html<String>> {
+        let rows = entity::entity_rows(dir)?;
+        let fragment =
+            EntitiesFragment::build(slug.clone(), files_area.clone(), rows, Some(message));
+        Ok(Html(fragment.render().map_err(render_error)?))
     };
+
+    let (entity, raw_folder) = match parse_entity_form(form) {
+        Ok(parsed) => parsed,
+        Err(error) => return inline_error(&dir, error.message().to_string()),
+    };
+    let folder = match ensure_allowed(&state, &raw_folder) {
+        Ok(folder) => folder,
+        Err(error) => return inline_error(&dir, error.message().to_string()),
+    };
+
+    // Любой отказ движка (пустая папка, нечитаемые файлы) показывается внутри
+    // блока сущностей: степпер и уже добавленные сущности остаются на месте,
+    // а не превращаются в один красный блок.
+    let error = api::confirm_entity(&dir, &entity, &folder)
+        .err()
+        .map(|error| error.message().to_string());
+
+    let rows = entity::entity_rows(&dir)?;
+    let fragment = EntitiesFragment::build(slug, files_area, rows, error);
     Ok(Html(fragment.render().map_err(render_error)?))
 }
 
@@ -1007,6 +1174,27 @@ async fn healthz(State(state): State<AppState>) -> String {
     )
 }
 
+/// Пришёл ли запрос от htmx.
+///
+/// htmx по умолчанию **не подменяет** содержимое при ответах 4xx/5xx, поэтому
+/// ошибку, которую пользователь должен увидеть прямо в интерфейсе, отдаём
+/// кодом 200 с HTML-фрагментом. Для обычных клиентов (curl, скрипты) сохраняем
+/// честный 400 с текстом.
+fn is_htmx(headers: &HeaderMap) -> bool {
+    headers.contains_key("hx-request")
+}
+
+/// Ошибка формы/пути: htmx — фрагмент с пояснением (200), иначе — 400.
+fn form_error(headers: &HeaderMap, message: impl Into<String>) -> WebResult<Html<String>> {
+    let message = message.into();
+    if is_htmx(headers) {
+        let fragment = ErrorFragment { message };
+        Ok(Html(fragment.render().map_err(render_error)?))
+    } else {
+        Err(WebError::bad_request(message))
+    }
+}
+
 /// Превратить сбой рендера askama в 500.
 fn render_error(error: askama::Error) -> WebError {
     WebError::internal(format!("template error: {error}"))
@@ -1151,3 +1339,92 @@ async fn shutdown_signal() {
 /// doc-теста оставляет зависимость явной и без предупреждений о мёртвом коде.
 #[allow(dead_code)]
 type SharedState = Arc<AppState>;
+
+// ---------------------------------------------------------------------------
+// Тесты: чистые помощники веб-слоя (без сервера, БД и файлов)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allowlist_message_lists_every_root_and_the_env_var() {
+        let message = outside_allowed_roots_message(
+            Path::new("/tmp/secret"),
+            &[PathBuf::from("/data/one"), PathBuf::from("/data/two")],
+        );
+        // Пользователь должен понять и что запрещено, и куда можно, и чем это меняют.
+        assert!(message.contains("/tmp/secret"), "{message}");
+        assert!(
+            message.contains("Allowed roots: /data/one, /data/two"),
+            "{message}"
+        );
+        assert!(message.contains("STRATA_SOURCE_ROOTS"), "{message}");
+        assert!(
+            message.contains("outside the folders this server may read"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn allowlist_message_survives_an_empty_root_list() {
+        let message = outside_allowed_roots_message(Path::new("/tmp/secret"), &[]);
+        assert!(
+            message.contains("Allowed roots: (none configured)"),
+            "{message}"
+        );
+        // Даже без корней сообщение остаётся предложением, а не обрывком.
+        assert!(message.ends_with("STRATA_SOURCE_ROOTS."), "{message}");
+    }
+
+    #[test]
+    fn entity_form_trims_the_name_and_the_folder() {
+        let form = EntityForm {
+            entity: String::from("  sales \n"),
+            folder: String::from("  /data/sales  "),
+        };
+        let (entity, folder) = parse_entity_form(form).expect("форма режима A разобрана");
+        assert_eq!(entity, "sales");
+        assert_eq!(folder, PathBuf::from("/data/sales"));
+    }
+
+    #[test]
+    fn entity_form_rejects_empty_fields_with_a_hint() {
+        // Пустое имя: пользователь должен узнать, чего не хватает, а не получить
+        // «path not found: » из движка.
+        let no_name = EntityForm {
+            entity: String::from("   "),
+            folder: String::from("/data/sales"),
+        };
+        let error = parse_entity_form(no_name).expect_err("пустое имя — ошибка");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(
+            error.message().contains("Entity name is required"),
+            "{}",
+            error.message()
+        );
+
+        let no_folder = EntityForm {
+            entity: String::from("sales"),
+            folder: String::new(),
+        };
+        let error = parse_entity_form(no_folder).expect_err("пустая папка — ошибка");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(
+            error.message().contains("Folder path is required"),
+            "{}",
+            error.message()
+        );
+    }
+
+    #[test]
+    fn htmx_requests_are_detected_by_header() {
+        // htmx не подменяет контент при 4xx, поэтому по этому признаку решаем,
+        // отдавать ошибку фрагментом (200) или честным 400.
+        let mut headers = HeaderMap::new();
+        assert!(!is_htmx(&headers));
+        headers.insert("hx-request", "true".parse().expect("значение заголовка"));
+        assert!(is_htmx(&headers));
+    }
+}

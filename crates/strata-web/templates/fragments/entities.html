@@ -1,10 +1,59 @@
-{# Фрагмент: строки сущностей воркспейса. Возвращается страницей хаба и после
-   подтверждения кандидата. У каждой строки видны статусы всех стадий
-   (пилюли) — состояние видно без кликов, как в §3 дизайна.
-   Кнопка «Open» ведёт на страницу сущности, где живут все стадии. #}
+{# Фрагмент: путь пользователя в воркспейсе. Возвращается страницей хаба и после
+   подтверждения сущности (оба варианта добавления данных), поэтому вместе со
+   списком сущностей обновляются степпер и подсказка «что дальше».
+   Состояние — только серверное: пилюли и шаг считает `status.rs`. #}
+
+{# Ошибка добавления: показывается внутри блока, степпер и список остаются. #}
+{% if let Some(message) = error %}
+<div class="rounded-lg border border-red-700 px-3 py-2 text-xs text-red-300">
+    {{ message }}
+</div>
+{% endif %}
+
+{# --- Степпер: 1 Source · 2 Schema · 3 Rules · 4 ODS ----------------------- #}
+{# Пройденные шаги — зелёные, текущий — синий, будущие — серые. Шаги 2–4 —
+   ссылки во вкладку сущности (`?tab=…`), когда сущность уже есть. #}
+<div class="flex flex-wrap items-stretch gap-2">
+    {% for step in stepper %}
+        {% if let Some(href) = step.href %}
+            <a class="{{ step.class }} block hover:border-[#4da3ff]" href="{{ href }}"
+               data-step="{{ step.state }}">
+                <div class="mono">{{ step.title }}</div>
+                <div class="text-[11px] text-slate-500">{{ step.detail }}</div>
+            </a>
+        {% else %}
+            <div class="{{ step.class }}" data-step="{{ step.state }}">
+                <div class="mono">{{ step.title }}</div>
+                <div class="text-[11px] text-slate-500">{{ step.detail }}</div>
+            </div>
+        {% endif %}
+    {% endfor %}
+    <span class="self-center text-[11px] mono px-2 py-1 rounded border
+        {% if ready_to_serve %}border-emerald-700 text-emerald-400{% else %}border-[#4da3ff] text-slate-100{% endif %}">
+        {{ progress_badge }}
+    </span>
+</div>
+
+{# --- Подсказка «что дальше»: видна всегда, когда есть что доделать -------- #}
+{% if let Some(next) = hint %}
+<div class="text-xs">
+    <span class="text-slate-300">{{ next.text }}</span>
+    <a class="ml-2 text-[#4da3ff] hover:underline" href="{{ next.href }}">Open this step →</a>
+</div>
+{% endif %}
+
 {% if rows.is_empty() %}
-    <p class="text-sm text-slate-500 italic">No entities confirmed yet — scan a root and confirm a candidate.</p>
+    {# --- Пустое состояние: два явных способа начать ----------------------- #}
+    <div class="card rounded-lg p-4 space-y-3">
+        <h2 class="text-sm font-semibold">Add your data</h2>
+        <p class="text-xs text-slate-400">
+            Point the service at a folder with your files — that folder becomes one entity.
+            Pick whichever matches how your files are stored.
+        </p>
+        {% include "fragments/add_data.html" %}
+    </div>
 {% else %}
+    {# --- Сущности есть: строки со стадиями и «Open →» --------------------- #}
     <div class="space-y-2">
     {% for row in rows %}
         <div class="card rounded-lg p-3 flex flex-wrap items-center gap-3">
@@ -31,4 +80,13 @@
         </div>
     {% endfor %}
     </div>
+
+    {# Добавить ещё данные можно и после первой сущности — формы те же, но
+       свёрнуты, чтобы список оставался главным на экране. #}
+    <details class="rounded-lg border border-slate-700 px-3 py-2">
+        <summary class="text-xs text-slate-300 cursor-pointer select-none">+ Add more data</summary>
+        <div class="pt-3">
+            {% include "fragments/add_data.html" %}
+        </div>
+    </details>
 {% endif %}

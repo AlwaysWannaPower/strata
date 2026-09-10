@@ -19,6 +19,20 @@
     {% endif %}
 </section>
 
+{# Путь пользователя целиком, одной лёгкой строкой: те же четыре шага, что и
+   степпер воркспейса (подписи берутся из `status::PipelineStep`). #}
+<section class="rounded-xl border border-slate-800 px-4 py-2">
+    <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]">
+        <span class="uppercase tracking-wider text-slate-500 mr-1">How it works</span>
+        {% for step in steps %}
+            <span class="text-slate-400">
+                <span class="mono text-slate-200">{{ step.title }}</span> — {{ step.detail }}
+            </span>
+            {% if !loop.last %}<span class="text-slate-600">→</span>{% endif %}
+        {% endfor %}
+    </div>
+</section>
+
 {# Главная страница — вход в пайплайн: выбрать или создать воркспейс. #}
 <section class="card rounded-xl">
     <div class="card-head px-4 py-2 rounded-t-xl flex items-center gap-3">
@@ -55,18 +69,33 @@
     </div>
 </section>
 
-<section class="card rounded-xl">
-    <div class="card-head px-4 py-2 rounded-t-xl">
-        <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-400">Allowed source roots</h2>
-    </div>
-    <div class="p-4 text-xs text-slate-400 space-y-1">
-        {# Безопасность: сервис может читать только папки, перечисленные здесь. #}
+{# Настройка оператора, а не пользователя: убрана в свёрнутый блок, чтобы не
+   сбивать с пути. Ключевое для пользователя здесь — его личная папка: файлы
+   можно положить туда и указать её как scan root (она уже в allowlist, если
+   оператор не переопределил STRATA_SOURCE_ROOTS). #}
+<details class="card rounded-xl">
+    <summary class="card-head px-4 py-2 rounded-xl cursor-pointer select-none text-xs font-semibold uppercase tracking-wider text-slate-400">
+        Server settings (advanced)
+    </summary>
+    <div class="p-4 text-xs text-slate-400 space-y-2">
+        <p>
+            The service may only read folders listed here. Operator setting:
+            <span class="mono">STRATA_SOURCE_ROOTS</span>.
+        </p>
         {% for root in source_roots %}
             <div class="mono">{{ root }}</div>
         {% endfor %}
-        <p class="pt-2 text-slate-500">
-            Set <span class="mono">STRATA_SOURCE_ROOTS</span> (colon-separated) to allow more folders.
-        </p>
+        {% if let Some(area) = files_area %}
+            <p class="pt-2">
+                Your files area: <span class="mono text-slate-300">{{ area }}</span> —
+                put your files there and use that path as a scan root.
+            </p>
+        {% else %}
+            <p class="pt-2">
+                Sign in to get a personal files area under
+                <span class="mono">{{ workspace_root }}</span>.
+            </p>
+        {% endif %}
     </div>
-</section>
+</details>
 {% endblock %}
