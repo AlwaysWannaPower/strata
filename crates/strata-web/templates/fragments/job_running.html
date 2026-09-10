@@ -1,0 +1,20 @@
+{# Progress fragment for a running staging job.
+   It polls itself: hx-get hits the job endpoint, hx-trigger fires every second,
+   hx-swap="outerHTML" replaces this whole block. When the job finishes the
+   server returns the result fragment (no polling attributes) and the loop ends. #}
+<div class="card rounded-lg border-l-4 border-l-[#4da3ff] p-3 space-y-2"
+     hx-get="/w/{{ slug }}/jobs/{{ job_id }}"
+     hx-trigger="every 1s"
+     hx-swap="outerHTML">
+    <div class="text-sm">
+        <span class="mono">{{ entity }}</span>
+        <span class="text-slate-400">
+            staging…
+            {% if total > 0 %}{{ done }}/{{ total }} file(s){% else %}starting…{% endif %}
+        </span>
+    </div>
+    <div class="h-2 w-full rounded bg-slate-800 overflow-hidden">
+        <div class="h-2 rounded bg-[#4da3ff] transition-all duration-300"
+             style="width: {{ percent }}%"></div>
+    </div>
+</div>

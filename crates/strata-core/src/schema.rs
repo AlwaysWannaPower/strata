@@ -217,6 +217,24 @@ pub fn stage_folder_with_schema(
     dest_dir: &Path,
     schema: &SchemaFile,
 ) -> crate::Result<FolderReport> {
+    stage_folder_with_schema_progress(src_dir, dest_dir, schema, |_, _| {})
+}
+
+/// Same as [`stage_folder_with_schema`], but reports progress after every file.
+///
+/// `on_progress(done_files, total_files)` is called once per processed file —
+/// including skipped ones, because "done" means "we are past this file", which
+/// is what a progress bar must show. The web service uses this to stream a
+/// progress fragment while the work runs in a background thread.
+pub fn stage_folder_with_schema_progress<F>(
+    src_dir: &Path,
+    dest_dir: &Path,
+    schema: &SchemaFile,
+    mut on_progress: F,
+) -> crate::Result<FolderReport>
+where
+    F: FnMut(usize, usize),
+{
     use std::fs;
     fs::create_dir_all(dest_dir)?;
 
@@ -231,9 +249,11 @@ pub fn stage_folder_with_schema(
     let mut skipped = Vec::new();
     let mut total_rows = 0u64;
 
+    let total_files = scan.files.len();
     for (index, meta) in scan.files.iter().enumerate() {
         if meta.kind == "Other" {
             skipped.push((meta.name.clone(), String::from("unsupported file kind")));
+            on_progress(index + 1, total_files);
             continue;
         }
         let source_path = src_dir.join(&meta.name);
@@ -243,6 +263,7 @@ pub fn stage_folder_with_schema(
             Ok(proposal) => proposal,
             Err(err) => {
                 skipped.push((meta.name.clone(), format!("cannot read: {err}")));
+                on_progress(index + 1, total_files);
                 continue;
             }
         };
@@ -289,6 +310,7 @@ pub fn stage_folder_with_schema(
             }
             Err(err) => skipped.push((meta.name.clone(), format!("stage failed: {err}"))),
         }
+        on_progress(index + 1, total_files);
     }
 
     Ok(FolderReport {
@@ -698,6 +720,28 @@ mod tests {
         assert_eq!(preview.rows.len(), 2);
         assert_eq!(preview.rows[0][0], "2026-01-05");
         assert_eq!(preview.columns[0].name, "дата");
+
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(dest);
+    }
+
+    #[test]
+    fn staging_reports_per_file_progress() {
+        let dir = temp_path("progress");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_text(&dir.join("a.csv"), &conform_csv("1,12.5,Alpha\n"));
+        write_text(&dir.join("b.csv"), &conform_csv("2,7.5,Beta\n"));
+        let dest = temp_path("progress_dst");
+
+        let mut seen: Vec<(usize, usize)> = Vec::new();
+        let report =
+            stage_folder_with_schema_progress(&dir, &dest, &sample_schema(), |done, total| {
+                seen.push((done, total));
+            })
+            .expect("stage");
+        assert_eq!(report.staged.len(), 2);
+        // One callback per file, monotonically increasing, denominator stable.
+        assert_eq!(seen, vec![(1, 2), (2, 2)]);
 
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(dest);

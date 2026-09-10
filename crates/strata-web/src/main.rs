@@ -30,8 +30,10 @@
 //! give us is a virtualized million-row grid; that is a later, opt-in island of
 //! JavaScript (AG Grid/ TanStack) talking to a paginated endpoint.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -60,6 +62,12 @@ struct AppState {
     source_roots: Vec<PathBuf>,
     /// Process start time, for the "uptime" chip.
     started: Instant,
+    /// Background staging jobs: id → (entity, state). Entries are removed as
+    /// soon as the job finishes and its final fragment has been served, so the
+    /// map stays tiny (a handful of in-flight runs).
+    jobs: Arc<Mutex<HashMap<String, Arc<Mutex<JobEntry>>>>>,
+    /// Monotonic job id source (`j1`, `j2`, …).
+    job_seq: Arc<AtomicU64>,
     /// Shared resource sampler (`sysinfo`). Kept in a `Mutex` because CPU%
     /// needs two refreshes separated by time, so the instance must persist
     /// between requests. This is the only lock in the service and it is held
@@ -90,6 +98,8 @@ impl AppState {
                 workspace_root,
                 source_roots,
                 started: Instant::now(),
+                jobs: Arc::new(Mutex::new(HashMap::new())),
+                job_seq: Arc::new(AtomicU64::new(1)),
                 system: Arc::new(Mutex::new(System::new())),
             },
             addr,
@@ -161,6 +171,42 @@ impl IntoResponse for WebError {
 }
 
 type WebResult<T> = Result<T, WebError>;
+
+// ---------------------------------------------------------------------------
+// Background jobs: staging runs out-of-band, the browser polls a fragment
+// ---------------------------------------------------------------------------
+
+/// Which entity a job belongs to (needed to render its final fragment).
+#[derive(Debug)]
+struct JobEntry {
+    entity: String,
+    state: JobState,
+}
+
+/// Lifecycle of one staging run.
+#[derive(Debug)]
+enum JobState {
+    /// Work in progress: `total == 0` means "not counted yet".
+    Running { done: usize, total: usize },
+    /// Finished successfully; the outcome carries the report.
+    Done(Box<api::StageOutcome>),
+    /// Finished with an engine/user error.
+    Failed(String),
+}
+
+/// Fragment: progress of a running job. It **polls itself** (`hx-get` pointing
+/// at the job endpoint, `hx-trigger="every 1s"`, `hx-swap="outerHTML"`), so the
+/// page keeps updating without a single line of JavaScript.
+#[derive(Template)]
+#[template(path = "fragments/job_running.html")]
+struct JobRunningFragment {
+    slug: String,
+    job_id: String,
+    entity: String,
+    done: usize,
+    total: usize,
+    percent: usize,
+}
 
 /// Ensure `candidate` is inside one of the allowed roots (after symlink-free
 /// canonicalization). This is the single guard against "read any file on the
@@ -383,25 +429,150 @@ async fn add_entity(
     Ok(Html(fragment.render().map_err(render_error)?))
 }
 
-/// `POST /w/{slug}/entities/{entity}/stage` — run schema-validated staging.
+/// `POST /w/{slug}/entities/{entity}/stage` — start staging in the background.
+///
+/// Staging is CPU- and IO-bound (Parquet writing, type checks), so it must not
+/// block the request thread: we spawn it on a blocking task and immediately
+/// return a *progress fragment* that polls the job endpoint. The browser sees
+/// the bar move; the server stays responsive for other users.
 async fn stage_entity(
     State(state): State<AppState>,
     AxumPath((slug, entity)): AxumPath<(String, String)>,
 ) -> WebResult<Html<String>> {
     let dir = require_workspace(&state, &slug)?;
-    match api::stage_entity(&dir, &entity) {
-        Ok(outcome) => {
-            let fragment = StageFragment { entity, outcome };
-            Ok(Html(fragment.render().map_err(render_error)?))
-        }
-        Err(error) => Ok(Html(
-            ErrorFragment {
-                message: error.message().to_string(),
+
+    let job_id = format!("j{}", state.job_seq.fetch_add(1, Ordering::Relaxed));
+    let entry = Arc::new(Mutex::new(JobEntry {
+        entity: entity.clone(),
+        state: JobState::Running { done: 0, total: 0 },
+    }));
+    state
+        .jobs
+        .lock()
+        .map_err(|_| WebError::internal("job registry poisoned"))?
+        .insert(job_id.clone(), entry.clone());
+
+    // The engine call runs on a blocking thread; progress is pushed into the
+    // shared job state, which the polling endpoint reads.
+    let task_entry = entry.clone();
+    let task_dir = dir.clone();
+    let task_entity = entity.clone();
+    tokio::task::spawn_blocking(move || {
+        let result = api::stage_entity_with_progress(&task_dir, &task_entity, |done, total| {
+            if let Ok(mut guard) = task_entry.lock() {
+                guard.state = JobState::Running { done, total };
             }
-            .render()
-            .map_err(render_error)?,
-        )),
+        });
+        if let Ok(mut guard) = task_entry.lock() {
+            guard.state = match result {
+                Ok(outcome) => JobState::Done(Box::new(outcome)),
+                Err(error) => JobState::Failed(error.message().to_string()),
+            };
+        }
+    });
+
+    let fragment = JobRunningFragment {
+        slug,
+        job_id,
+        entity,
+        done: 0,
+        total: 0,
+        percent: 0,
+    };
+    Ok(Html(fragment.render().map_err(render_error)?))
+}
+
+/// `GET /w/{slug}/jobs/{job_id}` — progress (running) or the final result.
+///
+/// htmx swaps this fragment into `#stage`. Running fragments keep polling;
+/// final fragments carry no polling attributes, so the loop stops by itself.
+/// Finished jobs are removed from the registry right after their result is
+/// served.
+async fn job_status(
+    State(state): State<AppState>,
+    AxumPath((slug, job_id)): AxumPath<(String, String)>,
+) -> WebResult<Html<String>> {
+    let _dir = require_workspace(&state, &slug)?;
+
+    let entry = {
+        let jobs = state
+            .jobs
+            .lock()
+            .map_err(|_| WebError::internal("job registry poisoned"))?;
+        jobs.get(&job_id).cloned()
+    };
+    let Some(entry) = entry else {
+        return Err(WebError::not_found(format!("job '{job_id}' not found")));
+    };
+
+    // Snapshot under the lock, then render outside it (never render holding a
+    // lock: a template error must not poison shared state).
+    enum Snapshot {
+        Running { done: usize, total: usize },
+        Final(JobState),
     }
+    let (entity, snapshot) = {
+        let mut guard = entry
+            .lock()
+            .map_err(|_| WebError::internal("job state poisoned"))?;
+        let entity = guard.entity.clone();
+        let snapshot = match &guard.state {
+            JobState::Running { done, total } => Snapshot::Running {
+                done: *done,
+                total: *total,
+            },
+            // Final states are consumed exactly once: the polling loop ends
+            // with this response, so there is nothing left to read afterwards.
+            JobState::Done(_) | JobState::Failed(_) => {
+                let taken = std::mem::replace(
+                    &mut guard.state,
+                    JobState::Failed(String::from("job result already served")),
+                );
+                Snapshot::Final(taken)
+            }
+        };
+        (entity, snapshot)
+    };
+
+    let (html, is_final) = match snapshot {
+        Snapshot::Running { done, total } => {
+            let percent = if total == 0 {
+                0
+            } else {
+                (done * 100 / total).min(100)
+            };
+            let fragment = JobRunningFragment {
+                slug,
+                job_id: job_id.clone(),
+                entity,
+                done,
+                total,
+                percent,
+            };
+            (fragment.render().map_err(render_error)?, false)
+        }
+        Snapshot::Final(JobState::Done(outcome)) => {
+            let fragment = StageFragment {
+                entity,
+                outcome: *outcome,
+            };
+            (fragment.render().map_err(render_error)?, true)
+        }
+        Snapshot::Final(JobState::Failed(message)) => (
+            ErrorFragment { message }.render().map_err(render_error)?,
+            true,
+        ),
+        Snapshot::Final(JobState::Running { .. }) => unreachable!("running is not final"),
+    };
+
+    // Finished → drop the job from the registry (browser stops polling).
+    if is_final {
+        if let Ok(mut jobs) = state.jobs.lock() {
+            jobs.remove(&job_id);
+        }
+    }
+
+    Ok(Html(html))
 }
 
 // ---------------------------------------------------------------------------
@@ -584,6 +755,7 @@ async fn main() {
         .route("/w/{slug}/scan", post(scan_root))
         .route("/w/{slug}/entities", post(add_entity))
         .route("/w/{slug}/entities/{entity}/stage", post(stage_entity))
+        .route("/w/{slug}/jobs/{job_id}", get(job_status))
         .with_state(state.clone());
 
     tracing::info!(

@@ -120,7 +120,49 @@ volumes:
   - ./data:/data/sources:ro              # сырьё (только чтение)
 ```
 
-## 7. Осознанные компромиссы и что дальше
+## 7. Фоновые задачи и прогресс (stage не блокирует запрос)
+
+Staging — CPU/IO-тяжёлая операция, поэтому она **не выполняется в обработчике
+запроса**:
+
+```text
+POST /…/stage
+   1. создаём запись задачи в реестре (Arc<Mutex<JobEntry>>)
+   2. tokio::task::spawn_blocking → движок (strata_core::api::stage_entity_with_progress)
+   3. сразу отдаём HTML-фрагмент с hx-get="/w/{slug}/jobs/{job_id}"
+      hx-trigger="every 1s" hx-swap="outerHTML"
+
+GET /w/{slug}/jobs/{job_id}
+   Running { done, total } → тот же поллинг-фрагмент с прогресс-баром
+   Done(outcome)           → финальный фрагмент (БЕЗ hx-атрибутов → поллинг сам останавливается)
+   Failed(message)         → красная плашка
+```
+
+Прогресс приходит из движка: `stage_folder_with_schema_progress` вызывает
+колбэк `(done, total)` после каждого файла (включая пропущенные — «done» значит
+«этот файл обработан»). Реестр задач крошечный: финальный результат отдаётся
+один раз и запись сразу удаляется.
+
+Проверено вживую: сущность из 60 файлов → POST отдал прогресс-фрагмент, первый
+поллинг показал «staging…», второй — финал «60 file(s), 480 row(s) → 60 part(s)».
+
+## 8. Ресурсы сервиса (RAM/CPU) и `/metrics`
+
+* `GET /metrics` — текстовый Prometheus-подобный вывод:
+  `strata_process_rss_bytes`, `strata_process_cpu_percent`,
+  `strata_host_memory_total_bytes`, `strata_host_memory_used_bytes`,
+  `strata_uptime_seconds`, `strata_workspaces_total`.
+* `GET /fragments/resources` — маленький HTML-фрагмент для виджета в правом
+  нижнем углу: `RAM 16 MB · CPU 4% · host 5.0 GB/8.0 GB · workspaces 2`.
+  В `base.html` он подтягивается через `hx-trigger="load, every 2s"`.
+
+Замеры идут через `sysinfo` (кросс-платформенно, включая macOS — в отличие от
+десктопного `monitor.rs`, который читает `/proc` и на маке показывал «—»).
+Инстанс `System` живёт в состоянии сервиса под `Mutex`: CPU% считается как
+дельта между двумя обновлениями, поэтому состояние нужно сохранять между
+запросами. Под блокировкой нет I/O — только мгновенные чтения.
+
+## 9. Осознанные компромиссы и что дальше
 
 - **Tailwind пока с CDN** — быстрый старт без node. Для прода: отдельная
   стадия сборки (node или tailwind standalone CLI) → `/static/app.css`.

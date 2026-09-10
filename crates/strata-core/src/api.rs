@@ -28,8 +28,7 @@ use std::path::{Path, PathBuf};
 use crate::{
     ColumnDef, FolderReport, ReaderOptions, SchemaFile, WorkspaceConfig, candidate_entity_name,
     create_workspace, data_dir, folder_to_parquet, list_entity_candidates, list_parts,
-    open_workspace, save_schema, scan_folder, schema_from_folder, stage_folder_with_schema,
-    upsert_binding,
+    open_workspace, save_schema, scan_folder, schema_from_folder, upsert_binding,
 };
 
 // ---------------------------------------------------------------------------
@@ -323,6 +322,20 @@ pub fn entity_files(workspace_dir: &Path, entity: &str) -> ApiResult<Vec<(String
 /// (never silently staged). Without a schema we fall back to plain raw staging
 /// so a user can still get Parquet out of a folder.
 pub fn stage_entity(workspace_dir: &Path, entity: &str) -> ApiResult<StageOutcome> {
+    stage_entity_with_progress(workspace_dir, entity, |_, _| {})
+}
+
+/// Same as [`stage_entity`], but reports `(done_files, total_files)` while it
+/// runs. Callers that must stay responsive (the web service) run this on a
+/// background thread and stream the progress to the browser.
+pub fn stage_entity_with_progress<F>(
+    workspace_dir: &Path,
+    entity: &str,
+    mut on_progress: F,
+) -> ApiResult<StageOutcome>
+where
+    F: FnMut(usize, usize),
+{
     let config = load_config(workspace_dir)?;
     let binding = config
         .bindings
@@ -334,8 +347,11 @@ pub fn stage_entity(workspace_dir: &Path, entity: &str) -> ApiResult<StageOutcom
     let dest = data_dir(workspace_dir, &config).join(entity);
 
     let report: FolderReport = match crate::load_schema(workspace_dir, &format!("{entity}.toml")) {
-        Ok(schema) => stage_folder_with_schema(&folder, &dest, &schema)
-            .map_err(|e| err("staging failed", e))?,
+        Ok(schema) => {
+            crate::stage_folder_with_schema_progress(&folder, &dest, &schema, &mut on_progress)
+                .map_err(|e| err("staging failed", e))?
+        }
+        // No schema confirmed yet: plain raw staging (no per-file callback).
         Err(_) => folder_to_parquet(&folder, &dest).map_err(|e| err("staging failed", e))?,
     };
 

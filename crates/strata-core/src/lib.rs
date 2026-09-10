@@ -49,6 +49,7 @@ pub mod schema;
 pub use schema::{
     FolderSchema, SchemaColumn, SchemaConflict, SchemaProposal, schema_from_file,
     schema_from_folder, source_to_parquet_typed, stage_folder_with_schema,
+    stage_folder_with_schema_progress,
 };
 
 /// Project persistence: `project.toml`, saved schemas, token helpers.
