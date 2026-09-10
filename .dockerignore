@@ -1,0 +1,11 @@
+# Build artifacts and local state that must never enter the image context.
+target/
+.cargo-home/
+.git/
+.gitignore
+**/*.parquet
+workspaces/
+data/
+Dockerfile
+docker-compose.yml
+*.log

@@ -1,0 +1,41 @@
+{# Fragment: scan candidates (mode B). Each one is a proposal; confirming it
+   creates schemas/<entity>.toml and binds the folder — an explicit user action. #}
+{% if candidates.is_empty() %}
+    <div class="text-sm text-slate-500 italic">
+        No candidate folders found. A scan root must contain entity folders as its
+        <span class="mono">direct</span> subfolders (no nesting).
+    </div>
+{% else %}
+    <h2 class="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
+        Candidates — proposals, nothing saved yet
+    </h2>
+    <div class="space-y-2">
+    {% for c in candidates %}
+        <div class="card rounded-lg p-3 flex flex-wrap items-center gap-3">
+            <div class="min-w-0 flex-1">
+                <span class="mono text-sm">{{ c.entity }}</span>
+                <span class="ml-2 text-[11px] text-slate-400 mono">
+                    {{ c.files }} file(s), {{ c.columns }} column(s)
+                </span>
+                {% if c.conflicts > 0 %}
+                    <span class="ml-2 text-[11px] px-1.5 py-0.5 rounded border border-amber-700 text-amber-400 mono">
+                        ⚠ {{ c.conflicts }} conflict(s)
+                    </span>
+                {% endif %}
+                <div class="text-[11px] text-slate-500 mono truncate">{{ c.folder.display() }}</div>
+            </div>
+            {# Confirm: hidden fields carry entity + folder; the response replaces
+               the #entities block with the updated list. #}
+            <form hx-post="/w/{{ slug }}/entities"
+                  hx-target="#entities"
+                  hx-swap="innerHTML">
+                <input type="hidden" name="entity" value="{{ c.entity }}">
+                <input type="hidden" name="folder" value="{{ c.folder.display() }}">
+                <button class="btn rounded-md px-3 py-1.5 text-xs whitespace-nowrap" type="submit">
+                    Confirm &amp; bind <span class="spinner">…</span>
+                </button>
+            </form>
+        </div>
+    {% endfor %}
+    </div>
+{% endif %}

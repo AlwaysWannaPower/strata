@@ -1,0 +1,46 @@
+# docker-compose for the Strata web service.
+#
+#   docker compose up --build        # build (cargo-chef layers) + run
+#   open http://localhost:8080
+#
+# Mount your raw data read-only under /data/sources and list the same paths in
+# STRATA_SOURCE_ROOTS. The service never reads anything outside that allowlist.
+
+services:
+  strata-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: strata-web:local
+    container_name: strata-web
+    ports:
+      - "8080:8080"
+    environment:
+      # Workspace storage (workspace.toml, schemas/, data/<entity>/*.parquet).
+      STRATA_WORKSPACE_ROOT: /data/workspaces
+      # Allowlist of folders the service may read source data from.
+      STRATA_SOURCE_ROOTS: /data/sources
+      STRATA_ADDR: 0.0.0.0:8080
+      RUST_LOG: strata_web=info
+    volumes:
+      # Named volume for workspaces (persists schemas + staged Parquet parts).
+      - strata-workspaces:/data/workspaces
+      # Read-only bind mount for raw input files. Change ./data on the host to
+      # wherever your files live: e.g. ${HOME}/datasets:/data/sources:ro
+      - ./data:/data/sources:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    # The engine is CPU/memory heavy during staging; keep it honest.
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2g
+
+volumes:
+  strata-workspaces:

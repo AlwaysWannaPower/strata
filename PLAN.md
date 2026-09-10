@@ -313,6 +313,28 @@ pipeline-вид со степенями Folder → Polars → Schema → Parquet
 
 ---
 
+### M5w — Web-сервис: axum + htmx + Tailwind (сделано, каркас)
+
+Решение: Dioxus-десктоп для сервиса избыточен; переходим на **server-rendered
+HTML + htmx**, чтобы выйти в сеть (контейнер, URL, многопользовательность).
+Дизайн и разбор — `docs/guide-web.md`.
+
+- `strata_core::api` — **фасад движка** (DTO + `ApiError`): list/create/open
+  workspace, scan_candidates, confirm_entity (схема+привязка), entities,
+  stage_entity (schema-validated), entity_files. Тесты: 36 в ядре.
+- `strata-web` — axum 0.8 + askama-шаблоны + htmx + Tailwind: страницы
+  workspaces/hub и фрагменты candidates/entities/stage/error; `/healthz`.
+- **Безопасность**: allowlist `STRATA_SOURCE_ROOTS` (canonicalize + starts_with),
+  валидация slug, 404 для чужого workspace.
+- **Docker**: multi-stage c **cargo-chef** (planner → cook → build → runtime),
+  non-root, HEALTHCHECK; `docker-compose.yml` (volume для workspace'ов, данные
+  read-only, лимиты cpu/mem). `.dockerignore`.
+- Легаси `strata-app` (Dioxus) остаётся, но в образ не собирается.
+
+Проверено вручную через HTTP: create→scan→confirm→stage, 400 на путь вне
+allowlist. Следующее: правила совместимости типов (i64→f64), фоновые задачи с
+прогрессом (SSE), авторизация/загрузка файлов, виртуализированный грид.
+
 ### M5 — Open Source готовность
 
 **Цель:** проект можно показать людям: лицензия, README, демо-данные, сборка, CI, релиз.

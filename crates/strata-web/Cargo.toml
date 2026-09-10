@@ -1,0 +1,16 @@
+[package]
+name = "strata-web"
+version.workspace = true
+edition.workspace = true
+description = "Strata web service (axum + htmx + Tailwind): server-rendered staging pipeline over strata-core's application API."
+
+[dependencies]
+# The engine is reached ONLY through `strata_core::api` — see src/main.rs docs.
+strata-core = { path = "../strata-core" }
+
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+askama = "0.14"
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

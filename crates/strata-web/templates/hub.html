@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}{{ name }}{% endblock %}
+
+{% block content %}
+{# The workspace "pipeline hub": one page, three steps —
+   1) point at a source root, 2) confirm entities (schema), 3) stage to Parquet.
+   All three talk to strata_core::api; htmx swaps the fragments below. #}
+<section class="card rounded-xl">
+    <div class="card-head px-4 py-2 rounded-t-xl flex flex-wrap items-center gap-3">
+        <h1 class="text-base font-semibold">Workspace: {{ name }}</h1>
+        <span class="text-[11px] mono text-slate-500">/w/{{ slug }} · data → {{ data_dir }}</span>
+        <span class="ml-auto text-[11px] mono text-slate-500">uptime {{ uptime_secs }}s</span>
+    </div>
+
+    <div class="p-4 space-y-4">
+        {# --- Step 1: scan root (mode B: direct subfolders are entities) ------- #}
+        <form class="flex flex-wrap gap-2 items-center"
+              hx-post="/w/{{ slug }}/scan"
+              hx-target="#candidates"
+              hx-swap="innerHTML">
+            <input class="input mono rounded-md px-3 py-2 flex-1 min-w-[280px]"
+                   type="text" name="root"
+                   placeholder="Root folder whose direct subfolders are entities…" required>
+            <button class="btn rounded-md px-4 py-2 text-sm" type="submit">
+                Scan root <span class="spinner">…</span>
+            </button>
+        </form>
+        <p class="text-[11px] text-slate-500">
+            Read-only: scanning proposes entities, nothing is written until you confirm.
+        </p>
+
+        {# --- Step 2: candidates fragment target ------------------------------- #}
+        <div id="candidates"></div>
+
+        {# --- Step 3: confirmed entities (also the target of confirm/stage) ---- #}
+        <div id="entities">
+            {% include "fragments/entities.html" %}
+        </div>
+
+        <div id="stage"></div>
+    </div>
+</section>
+{% endblock %}

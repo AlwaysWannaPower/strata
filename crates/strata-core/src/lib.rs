@@ -58,6 +58,10 @@ pub use project::{
     encoding_from_token, encoding_token, load_schema, open_project, save_schema, schema_names,
 };
 
+/// The **application API**: the stable façade that frontends (axum web today)
+/// are supposed to call instead of engine internals.
+pub mod api;
+
 /// Excel (XLSX/XLS) reading via calamine + the engine's CSV pipeline.
 pub mod excel;
 pub use excel::read_excel_frame;

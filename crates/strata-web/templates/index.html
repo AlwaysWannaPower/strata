@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Workspaces{% endblock %}
+
+{% block content %}
+{# The home page is the entry to the pipeline: pick or create a workspace. #}
+<section class="card rounded-xl">
+    <div class="card-head px-4 py-2 rounded-t-xl flex items-center gap-3">
+        <h1 class="text-sm font-semibold uppercase tracking-wider text-slate-400">Workspaces</h1>
+        <span class="text-[11px] mono text-slate-500">root: {{ workspace_root }}</span>
+    </div>
+    <div class="p-4 space-y-4">
+        <form method="post" action="/workspaces" class="flex flex-wrap gap-2 items-center">
+            <input class="input mono rounded-md px-3 py-2 flex-1 min-w-[260px]"
+                   type="text" name="name" placeholder="New workspace name (e.g. Sales 2026)" required>
+            <button class="btn rounded-md px-4 py-2 text-sm" type="submit">Create workspace</button>
+        </form>
+
+        {% if workspaces.is_empty() %}
+            <p class="text-sm text-slate-500 italic">No workspaces yet — create the first one above.</p>
+        {% else %}
+            <ul class="grid gap-2 sm:grid-cols-2">
+            {% for ws in workspaces %}
+                <li class="card rounded-lg p-3 flex items-center justify-between gap-3">
+                    <div class="min-w-0">
+                        <a class="mono text-sm text-[#4da3ff] hover:underline" href="/w/{{ ws.slug }}">
+                            {{ ws.name }}
+                        </a>
+                        <div class="text-[11px] text-slate-500 mono truncate">data: {{ ws.data_dir }}</div>
+                    </div>
+                    <a class="btn rounded-md px-3 py-1.5 text-xs whitespace-nowrap"
+                       href="/w/{{ ws.slug }}">Open ▸</a>
+                </li>
+            {% endfor %}
+            </ul>
+        {% endif %}
+    </div>
+</section>
+
+<section class="card rounded-xl">
+    <div class="card-head px-4 py-2 rounded-t-xl">
+        <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-400">Allowed source roots</h2>
+    </div>
+    <div class="p-4 text-xs text-slate-400 space-y-1">
+        {# Security: the service may only read folders listed here. #}
+        {% for root in source_roots %}
+            <div class="mono">{{ root }}</div>
+        {% endfor %}
+        <p class="pt-2 text-slate-500">
+            Set <span class="mono">STRATA_SOURCE_ROOTS</span> (colon-separated) to allow more folders.
+        </p>
+    </div>
+</section>
+{% endblock %}

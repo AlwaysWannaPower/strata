@@ -1,0 +1,50 @@
+{# Base layout: Tailwind (CDN for now) + htmx. Every page/fragment inherits this. #}
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Strata{% endblock %} · Strata</title>
+
+    {# Tailwind: CDN keeps the first milestone dependency-free. Production will
+       build a real stylesheet (node stage in Docker / tailwind standalone CLI)
+       and serve it from /static — see docs/guide-web.md. #}
+    <script src="https://cdn.tailwindcss.com"></script>
+    {# htmx: the whole client-side story. Forms post, fragments swap. #}
+    <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+    <style>
+        /* Small design tokens shared with the desktop look: dark, monospace data. */
+        :root { --accent: #4da3ff; }
+        body { background: #0e1216; }
+        .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+        .card { background: #151b22; border: 1px solid #2a333d; }
+        .card-head { background: #1a2129; border-bottom: 1px solid #2a333d; }
+        .input { background: #0e1216; border: 1px solid #2a333d; color: #d7dee6; }
+        .input:focus { outline: none; border-color: var(--accent); }
+        .btn { background: #1a2129; border: 1px solid #2a333d; color: #d7dee6; }
+        .btn:hover { border-color: var(--accent); }
+        /* htmx shows this class while a request is in flight */
+        .htmx-request .spinner { visibility: visible; }
+        .spinner { visibility: hidden; }
+    </style>
+</head>
+<body class="text-slate-200 min-h-screen">
+<header class="border-b border-slate-700 bg-[#151b22]">
+    <div class="max-w-6xl mx-auto px-5 py-3 flex items-center justify-between">
+        <a href="/" class="flex items-baseline gap-3 hover:opacity-90">
+            <span class="text-lg font-semibold tracking-wide">Strata</span>
+            <span class="text-xs text-slate-400">Data Engineering Workbench · raw layer</span>
+        </a>
+        <span class="text-xs text-slate-500 mono">staging: File → Parquet · no business rules</span>
+    </div>
+</header>
+
+<main class="max-w-6xl mx-auto px-5 py-6 space-y-5">
+    {% block content %}{% endblock %}
+</main>
+
+<footer class="max-w-6xl mx-auto px-5 py-6 text-xs text-slate-500 mono">
+    strata-web · axum + htmx · engine via strata_core::api
+</footer>
+</body>
+</html>

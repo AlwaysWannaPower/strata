@@ -1,0 +1,22 @@
+{# Fragment: result of one staging run (schema-validated). #}
+<div class="card rounded-lg border-l-4 border-l-[#4da3ff] p-3 space-y-1">
+    <div class="text-sm">
+        <span class="mono">{{ entity }}</span>
+        <span class="text-slate-400"> staged:
+            {{ outcome.staged_files }} file(s), {{ outcome.rows }} row(s) →
+            {{ outcome.parts }} part(s)
+        </span>
+    </div>
+    <div class="text-[11px] mono text-slate-500">{{ outcome.dataset_dir.display() }}</div>
+
+    {% if outcome.skipped_files > 0 %}
+        <div class="text-[11px] text-amber-400 mono pt-1">
+            {{ outcome.skipped_files }} file(s) skipped — the raw layer never stages silently:
+        </div>
+        <ul class="text-[11px] text-amber-300/90 mono list-disc pl-5 space-y-0.5">
+            {% for reason in outcome.skipped_reasons %}
+                <li>{{ reason }}</li>
+            {% endfor %}
+        </ul>
+    {% endif %}
+</div>
