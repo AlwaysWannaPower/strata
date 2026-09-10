@@ -131,7 +131,8 @@ fn format_float(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // Тесты используют только публичный API ядра (crate::…) и писатель xlsx,
+    // поэтому `use super::*` здесь не нужен — держим импорты точными.
     use crate::preview_source_with;
     use rust_xlsxwriter::Workbook;
     use std::sync::atomic::{AtomicUsize, Ordering};
